@@ -16,7 +16,6 @@
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { run } from './index';
 
 // Resolve `ISSUES.md` by walking up from the working directory; the package
@@ -57,6 +56,9 @@ function main(argv: string[]): void {
 	}
 }
 
-// Entry guard that works under both Bun and Node.
-const invokedAs = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
-if (import.meta.url === invokedAs) main(process.argv.slice(2));
+// `bin.ts` is exclusively the CLI entry point — it is never imported (tests and
+// library consumers import `./index`). Run unconditionally: an entry guard that
+// compares `import.meta.url` to `process.argv[1]` breaks when the built bin is
+// invoked through a symlink (as npm/bun bin shims and `npx`/`bunx` do), leaving
+// `main()` silently un-run.
+main(process.argv.slice(2));

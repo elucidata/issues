@@ -3,7 +3,6 @@
 // src/bin.ts
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 
 // src/index.ts
 var SECTION_ORDER = ["Issues", "Completed", "Deferred", "Won't Fix"];
@@ -393,6 +392,4 @@ function main(argv) {
     process.exit(1);
   }
 }
-var invokedAs = process.argv[1] ? pathToFileURL(process.argv[1]).href : "";
-if (import.meta.url === invokedAs)
-  main(process.argv.slice(2));
+main(process.argv.slice(2));
