@@ -13,6 +13,8 @@ issue IDs, datestamps, and section moves consistent instead of hand-editing.
 
 Prefer whichever is already set up, in this order:
 
+To determine which is set up, run `cat package.json | grep issues` to check for a script, then `which issues` for a global install. If neither check succeeds, fall back to npx (or bunx depending on project setup).
+
 1. If the repo has an `issues` script: `npm run issues -- <cmd>` (npm needs `--` to
    pass flags) or `bun run issues <cmd>`.
 2. If installed globally: `issues <cmd>`.
@@ -21,6 +23,8 @@ Prefer whichever is already set up, in this order:
 
 The tool finds `ISSUES.md` by walking **up** from the current directory. Set
 `ISSUES_FILE=/path/to/ISSUES.md` to target a specific file.
+
+If no `ISSUES.md` is found, run `issues add` which will create the file automatically, or inform the user and ask if they want to initialize one.
 
 ## Commands
 
