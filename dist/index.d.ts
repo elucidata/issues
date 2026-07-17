@@ -5,15 +5,15 @@
  * the ISSUES.md text. The thin CLI shell that reads and writes the file lives in
  * `./bin.ts`.
  *
- * Commands (dispatched by `run`):
- *   list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
- *   add "<title>" [--note "<text>"]                     add a new open issue
- *   done <id> [--defer] [--wontfix]                     close/defer/wontfix an issue
- *   reopen <id>                                         move an issue back to open
- *   show <id>                                           print an issue with its note
- *   edit <id> "<title>"                                 replace an issue's title
- *   note <id> "<text>"                                  append a line to an issue's note
- *   help                                               show usage
+ * Commands (dispatched by `run`) — reads take `--json` (§6) and `-q`:
+ *   list [section flags] [filters]   list issues (default: open), with ⊘/@/# markers
+ *   next / ready [filters]           the takeable frontier (topmost / whole list)
+ *   show <id> [--children]           full resolved dossier
+ *   tree                             containment-only forest (blocking as a ⊘ annotation)
+ *   doctor                           read-only linter (exits nonzero on findings)
+ *   add "<title>" [--note] [--part-of] [--blocked-by] [--status] [--assignee] [--label]
+ *   block/unblock · assign/unassign · label/unlabel · set/unset   field mutations
+ *   done <id> [--defer|--wontfix] · reopen · edit · note · help
  *
  * The file stays human-editable Markdown. Frontmatter and preamble prose are
  * preserved verbatim; section bodies are regenerated deterministically so an
@@ -60,19 +60,68 @@ export declare function findIssue(doc: Doc, idInput: string): {
     issue: Issue;
 } | null;
 export declare function today(): string;
-export declare function cmdAdd(doc: Doc, title: string, note?: string): string;
+export interface AddFields {
+    partOf?: string;
+    blockedBy?: string[];
+    status?: string;
+    assignee?: string;
+    labels?: string[];
+}
+export declare function cmdAdd(doc: Doc, title: string, note?: string, fields?: AddFields): string;
 export declare function cmdDone(doc: Doc, idInput: string, target?: SectionName): string;
 export declare function cmdReopen(doc: Doc, idInput: string): string;
 export declare function cmdEdit(doc: Doc, idInput: string, title: string): string;
 export declare function cmdNote(doc: Doc, idInput: string, text: string): string;
-export declare function cmdShow(doc: Doc, idInput: string): string;
+/**
+ * `block <id> --by <blocker>` — add one blocker (§5 decision 3). Self-reference is
+ * the one hard **reject**; unknown-blocker / cycle are warn-but-write (surfaced by
+ * the caller via `graphWarnings`). Re-blocking an existing edge is an idempotent no-op.
+ */
+export declare function cmdBlock(doc: Doc, idInput: string, byInput: string): string;
+/**
+ * `unblock <id> [--by <blocker>]` — remove one blocker, or (no `--by`) clear all
+ * (§5 decision 3). Removing an absent edge is an idempotent no-op + message (§5.3).
+ */
+export declare function cmdUnblock(doc: Doc, idInput: string, byInput?: string): string;
+/** `assign <id> <who>` — the claim is an explicit string; no identity magic (§5 decision 4). */
+export declare function cmdAssign(doc: Doc, idInput: string, who: string): string;
+/** `unassign <id>` — clear the claim; absent is an idempotent no-op (§5.3). */
+export declare function cmdUnassign(doc: Doc, idInput: string): string;
+/** `label <id> <name[,name]>` — additive, deduped (§5 decision 5). */
+export declare function cmdLabel(doc: Doc, idInput: string, names: string[]): string;
+/** `unlabel <id> <name[,name]>` — targeted removal; absent names no-op (§5.3). */
+export declare function cmdUnlabel(doc: Doc, idInput: string, names: string[]): string;
+/**
+ * `set <id> <key>:<value>` — replace a flat scalar (`status`) or any UDA (§5 decision
+ * 6). Recognized relational keys route to their fields (a generic escape hatch); an
+ * unknown key upserts a verbatim UDA. Returns any write-time advisories: `set status:`
+ * on a closed issue, or a value outside a declared `statuses:` set — both warn-but-write
+ * (§5 decisions 7, 15 / §5.3).
+ */
+export declare function cmdSet(doc: Doc, idInput: string, key: string, value: string): {
+    message: string;
+    warnings: string[];
+};
+/** `unset <id> <key>` — remove a scalar/UDA; absent is an idempotent no-op (§5.3). */
+export declare function cmdUnset(doc: Doc, idInput: string, key: string): string;
+export interface ShowOptions {
+    children?: boolean;
+    quiet?: boolean;
+}
+/**
+ * `show <id>` — the full resolved dossier (§5 decision 17): status/assignee/labels,
+ * relationships expanded with their target's title + open/closed state, derived
+ * `⊘ blocked`, the note body, this issue's §3 warnings, and (with `--children`) its
+ * containment subtree. Its own render path — terminal output is never double-spaced.
+ */
+export declare function cmdShow(doc: Doc, idInput: string, opts?: ShowOptions): string;
 export interface ListOptions {
     all?: boolean;
     closed?: boolean;
     deferred?: boolean;
     wontfix?: boolean;
 }
-export declare function cmdList(doc: Doc, opts?: ListOptions): string;
+export declare function cmdList(doc: Doc, opts?: ListOptions, filters?: FrontierFilters): string;
 /**
  * Is `issue` blocked? True iff any of its `blocked-by:` ids still sits in the
  * open `Issues` section — direct-only, non-transitive (§3.1). A dangling id
@@ -107,10 +156,73 @@ export interface FrontierFilters {
  * Pure; nothing stored.
  */
 export declare function frontier(doc: Doc, filters?: FrontierFilters): Issue[];
+/**
+ * Is `issue` (living in `section`) takeable — the base frontier predicate as a
+ * per-issue boolean for the `--json` contract (§6): open, unblocked, and unclaimed.
+ * Closed issues are never takeable.
+ */
+export declare function isTakeable(doc: Doc, issue: Issue, section: SectionName): boolean;
 /** `ready` — the whole ordered takeable frontier (§4.2); empty is diagnosed (§4.5). */
 export declare function cmdReady(doc: Doc, filters?: FrontierFilters): string;
 /** `next` — the topmost takeable issue (`ready[0]`), or the same empty-diagnosis. */
 export declare function cmdNext(doc: Doc, filters?: FrontierFilters): string;
+/**
+ * `tree` — the containment-only forest (§5 decision 13), state-annotated. Roots are
+ * issues with no valid parent (top-level or dangling `part-of:`); children nest by
+ * `part-of:`. Blocking is a node annotation (`⊘`), never tree structure.
+ */
+export declare function cmdTree(doc: Doc): string;
+export declare function doctorFindings(doc: Doc, text: string): string[];
+/** `doctor` — human-readable grouped findings; exit code is the caller's job (§5 decision 19). */
+export declare function cmdDoctor(doc: Doc, text: string): string;
+export declare function cmdListJson(doc: Doc, opts?: ListOptions, filters?: FrontierFilters): {
+    id: string;
+    title: string;
+    section: "Completed" | "Deferred" | "Issues" | "Won't Fix";
+    status: string | null;
+    assignee: string | null;
+    labels: string[];
+    blockedBy: string[];
+    partOf: string | null;
+    blocked: boolean;
+    takeable: boolean;
+}[];
+export declare function cmdReadyJson(doc: Doc, filters?: FrontierFilters): {
+    issues: {
+        id: string;
+        title: string;
+        section: "Completed" | "Deferred" | "Issues" | "Won't Fix";
+        status: string | null;
+        assignee: string | null;
+        labels: string[];
+        blockedBy: string[];
+        partOf: string | null;
+        blocked: boolean;
+        takeable: boolean;
+    }[];
+    reason: string | null;
+};
+export declare function cmdNextJson(doc: Doc, filters?: FrontierFilters): {
+    issue: {
+        id: string;
+        title: string;
+        section: "Completed" | "Deferred" | "Issues" | "Won't Fix";
+        status: string | null;
+        assignee: string | null;
+        labels: string[];
+        blockedBy: string[];
+        partOf: string | null;
+        blocked: boolean;
+        takeable: boolean;
+    } | null;
+    reason: string | null;
+};
+export declare function cmdTreeJson(doc: Doc): unknown[];
+export declare function cmdShowJson(doc: Doc, idInput: string, opts?: ShowOptions): Record<string, unknown>;
+export declare function cmdDoctorJson(doc: Doc, text: string): {
+    ok: boolean;
+    findings: string[];
+};
 export interface RunResult {
     text: string;
     output: string;

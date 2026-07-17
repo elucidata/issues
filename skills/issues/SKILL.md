@@ -31,28 +31,65 @@ If no `ISSUES.md` is found, run `issues add` which will create the file automati
 ```
 issues <command> [args]
 
-  list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
-  add "<title>" [--note "<text>"]                     add a new open issue
-  done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
-  reopen <id>                                         move an issue back to open
-  show <id>                                           print an issue with its note
-  edit <id> "<title>"                                 replace an issue's title
-  note <id> "<text>"                                  append a line to an issue's note
-  help                                               show usage
+Reads (add --json for a machine contract; -q silences advisories):
+  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  next   [filters]                                       the topmost takeable issue
+  ready  [filters] [--limit N]                           the whole takeable frontier
+  show <id> [--children]                                 full resolved dossier
+  tree                                                   containment forest (⊘ = blocked)
+  doctor                                                 lint the file (exit nonzero on findings)
+
+Mutations:
+  add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
+                [--status <s>] [--assignee <who>] [--label <name[,name]>]
+  block <id> --by <blocker>        unblock <id> [--by <blocker>]   (no --by clears all)
+  assign <id> <who>                unassign <id>
+  label <id> <name[,name]>         unlabel <id> <name[,name]>
+  set <id> <key>:<value>           unset <id> <key>
+  done <id> [--defer|--wontfix]    reopen <id>
+  edit <id> "<title>"              note <id> "<text>"
+  help                                                   show usage
+
+filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+         (AND across dimensions, OR within a repeated/comma-listed dimension)
 ```
 
 IDs are forgiving: `1`, `001`, `m1`, `M001` all resolve to the same canonical id.
 
+## The model — two orthogonal axes plus a claim
+
+Beyond open/closed sections, issues carry inline metadata on the tail of the line:
+
+- **`blocked-by:<id[,id]>`** — an issue is *blocked* while any listed blocker is still
+  open (direct, non-transitive; closing a blocker unblocks it). Manage with
+  `block`/`unblock`. Self-reference is rejected; unknown/cyclic blockers warn but write.
+- **`part-of:<id>`** — pure containment (a parent/child tree), **no** lifecycle or
+  blocking flow. Shown by `tree` / `show --children`.
+- **`@assignee`** — the claim; a claimed issue leaves the default `next`/`ready`
+  frontier. Manage with `assign`/`unassign`.
+- **`status:<value>`** and **`#label`** — a freeform workflow scalar (open-only; voided
+  on close) and category sigils. `set`/`unset` for `status:` + any custom `key:value`
+  UDA; `label`/`unlabel` for labels.
+
+`next`/`ready` are always the **takeable frontier** (open ∩ unblocked ∩ unclaimed);
+filters only narrow it. Warnings are advisory — stderr, exit 0, silenceable with `-q`.
+`doctor` is the exception: it exits nonzero when it finds anything, so it is CI-gateable.
+
 ## Examples
 
 ```sh
-issues list                                  # open issues only
+issues list                                  # open issues only, with ⊘/@/# markers
 issues list --all                            # every section
 issues add "Login button misaligned on iOS"  # -> Added 007: ...
-issues add "Flaky test" --note "Fails ~1 in 5 on CI"
-issues done 7                                # -> Completed, datestamped
-issues done 7 --defer                        # -> Deferred instead
-issues show 7
+issues add "Wire parser" --blocked-by 4 --status wip --label parser,ui
+issues block 7 --by 4                         # 7 is now blocked by 4
+issues assign 7 matt                          # claim it
+issues ready --status ready-for-agent --json  # machine-readable takeable frontier
+issues next                                   # the topmost takeable issue
+issues tree                                   # containment forest
+issues show 7 --children                      # dossier + subtree
+issues doctor                                 # lint; exit 1 on findings
+issues done 7                                 # -> Completed, datestamped (status voided)
 ```
 
 ## The ISSUES.md format (for hand edits / context)

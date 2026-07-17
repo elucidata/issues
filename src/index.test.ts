@@ -13,10 +13,22 @@ import {
 	cmdShow,
 	cmdList,
 	isBlocked,
+	isTakeable,
 	frontier,
 	graphWarnings,
 	cmdNext,
 	cmdReady,
+	cmdBlock,
+	cmdUnblock,
+	cmdAssign,
+	cmdUnassign,
+	cmdLabel,
+	cmdUnlabel,
+	cmdSet,
+	cmdUnset,
+	cmdTree,
+	cmdDoctor,
+	doctorFindings,
 	run
 } from './index';
 
@@ -756,5 +768,378 @@ describe('T3 frontier through the run seam (filters, warnings, exit code)', () =
 
 	it('a clean read emits no warnings', () => {
 		expect(run(SAMPLE, ['ready']).warnings).toEqual([]);
+	});
+});
+
+// ── T4 — CLI verbs, reads & --json (spec #11 Stage 4, §§5–6, ADR 0005) ────────
+// A clean, fully-annotated fixture the T4 surface drives end-to-end: a parent map
+// (001) with two children (002, 003), a claimed issue (004), a blocked one (005).
+const T4 = `---
+next_id: 10
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Parent map.
+
+- [ ] 002: Child A. part-of:001 status:ready-for-agent #frontend
+
+- [ ] 003: Child B. part-of:001 @jane #backend
+
+- [ ] 004: Claimed. @matt #frontend
+
+- [ ] 005: Blocked one. blocked-by:001
+
+## Completed
+
+- [x] 007: Done work. (2026-06-07)
+
+## Deferred
+
+## Won't Fix
+`;
+
+describe('T4 verbs — block / unblock (§5 decision 3)', () => {
+	it('block adds one blocker, canonicalizing the id', () => {
+		const doc = parse(T4);
+		expect(cmdBlock(doc, '002', '4')).toMatch(/blocked-by 004/);
+		expect(findIssue(doc, '002')!.issue.blockedBy).toEqual(['004']);
+	});
+
+	it('rejects a self-reference (the one hard reject)', () => {
+		expect(() => cmdBlock(parse(T4), '002', '002')).toThrow(/itself/i);
+		expect(() => run(T4, ['block', '002', '--by', '002'])).toThrow(/itself/i);
+	});
+
+	it('re-blocking an existing edge is an idempotent no-op', () => {
+		const doc = parse(T4);
+		cmdBlock(doc, '005', '001'); // 005 already blocked-by:001
+		expect(findIssue(doc, '005')!.issue.blockedBy).toEqual(['001']);
+	});
+
+	it('unblock --by removes one edge; no --by clears all', () => {
+		const doc = parse(T4);
+		cmdBlock(doc, '005', '002'); // now blocked-by 001,002
+		expect(cmdUnblock(doc, '005', '002')).toMatch(/no longer blocked-by 002/);
+		expect(findIssue(doc, '005')!.issue.blockedBy).toEqual(['001']);
+		cmdUnblock(doc, '005'); // clear all
+		expect(findIssue(doc, '005')!.issue.blockedBy).toEqual([]);
+	});
+
+	it('removing an absent edge is an idempotent no-op + message (§5.3)', () => {
+		const doc = parse(T4);
+		expect(cmdUnblock(doc, '001')).toMatch(/no blockers/);
+		expect(cmdUnblock(doc, '005', '999')).toMatch(/was not blocked-by 999/);
+	});
+
+	it('warn-but-write on an unknown blocker through the run seam', () => {
+		const r = run(T4, ['block', '002', '--by', '999']);
+		expect(r.mutated).toBe(true);
+		expect(r.text).toContain('blocked-by:999');
+		expect(r.warnings.some((w) => /999.*not found/.test(w))).toBe(true);
+	});
+
+	it('missing --by is a usage error', () => {
+		expect(() => run(T4, ['block', '002'])).toThrow(/missing --by/i);
+	});
+});
+
+describe('T4 verbs — assign / unassign (§5 decision 4)', () => {
+	it('assign sets an explicit claim string', () => {
+		const doc = parse(T4);
+		expect(cmdAssign(doc, '001', 'matt')).toMatch(/@matt/);
+		expect(findIssue(doc, '001')!.issue.assignee).toBe('matt');
+	});
+
+	it('unassign clears; absent is an idempotent no-op (§5.3)', () => {
+		const doc = parse(T4);
+		expect(cmdUnassign(doc, '004')).toMatch(/unassigned/);
+		expect(findIssue(doc, '004')!.issue.assignee).toBeUndefined();
+		expect(cmdUnassign(doc, '001')).toMatch(/was not assigned/);
+	});
+});
+
+describe('T4 verbs — label / unlabel (§5 decision 5)', () => {
+	it('label is additive and deduped', () => {
+		const doc = parse(T4);
+		cmdLabel(doc, '004', ['frontend', 'urgent']); // frontend already present
+		expect(findIssue(doc, '004')!.issue.labels).toEqual(['frontend', 'urgent']);
+	});
+
+	it('unlabel removes targeted names; absent names no-op (§5.3)', () => {
+		const doc = parse(T4);
+		expect(cmdUnlabel(doc, '002', ['frontend'])).toMatch(/unlabelled/);
+		expect(findIssue(doc, '002')!.issue.labels).toEqual([]);
+		expect(cmdUnlabel(doc, '002', ['nope'])).toMatch(/no matching labels/);
+	});
+
+	it('comma-lists through the run seam', () => {
+		const r = run(T4, ['label', '001', 'a,b']);
+		expect(r.text).toContain('#a #b');
+	});
+});
+
+describe('T4 verbs — set / unset (§5 decision 6)', () => {
+	it('set writes a scalar status', () => {
+		const { message } = cmdSet(parse(T4), '001', 'status', 'wip');
+		expect(message).toMatch(/status:wip/);
+	});
+
+	it('set on a closed issue warns but writes (§5.3, decision 15)', () => {
+		const doc = parse(T4);
+		const { warnings } = cmdSet(doc, '007', 'status', 'wip'); // 007 is Completed
+		expect(findIssue(doc, '007')!.issue.status).toBe('wip');
+		expect(warnings.some((w) => /closed/.test(w))).toBe(true);
+	});
+
+	it('an unknown key upserts a verbatim UDA', () => {
+		const doc = parse(T4);
+		cmdSet(doc, '001', 'type', 'bug');
+		expect(findIssue(doc, '001')!.issue.uda).toEqual([{ key: 'type', value: 'bug' }]);
+	});
+
+	it('unset removes a scalar/UDA; absent is an idempotent no-op (§5.3)', () => {
+		const doc = parse(T4);
+		expect(cmdUnset(doc, '002', 'status')).toMatch(/unset status/);
+		expect(findIssue(doc, '002')!.issue.status).toBeUndefined();
+		expect(cmdUnset(doc, '002', 'status')).toMatch(/was not set/);
+	});
+
+	it('warns when a status is outside a declared statuses: set (decision 7)', () => {
+		const declared = `---\nnext_id: 2\npattern: "###"\nstatuses: ready, wip, review\n---\n# T\n\n## Issues\n\n- [ ] 001: A.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const r = run(declared, ['set', '001', 'status:banana']);
+		expect(r.text).toContain('status:banana');
+		expect(r.warnings.some((w) => /declared/.test(w))).toBe(true);
+	});
+});
+
+describe('T4 add field flags — byte-identical to the verb sequence (§5 decision 2)', () => {
+	it('produces the same file as add + set + block + assign + label', () => {
+		const viaFlags = run(SAMPLE, [
+			'add',
+			'Task',
+			'--part-of',
+			'002',
+			'--blocked-by',
+			'004,006',
+			'--status',
+			'wip',
+			'--assignee',
+			'matt',
+			'--label',
+			'a,b'
+		]).text;
+		let t = run(SAMPLE, ['add', 'Task']).text;
+		t = run(t, ['set', '007', 'part-of:002']).text;
+		t = run(t, ['block', '007', '--by', '004']).text;
+		t = run(t, ['block', '007', '--by', '006']).text;
+		t = run(t, ['set', '007', 'status:wip']).text;
+		t = run(t, ['assign', '007', 'matt']).text;
+		t = run(t, ['label', '007', 'a,b']).text;
+		expect(viaFlags).toBe(t);
+		expect(viaFlags).toContain(
+			'- [ ] 007: Task part-of:002 blocked-by:004,006 status:wip @matt #a #b'
+		);
+	});
+
+	it('a bare add still writes no tail fields (§8 back-compat)', () => {
+		expect(run(SAMPLE, ['add', 'Plain']).text).toContain('- [ ] 007: Plain\n');
+	});
+});
+
+describe('T4 close voids status: only (§5 decision 15)', () => {
+	it('done clears status but keeps assignee / relationships / labels', () => {
+		const r = run(ANNOTATED, ['done', '007']); // 007: part-of blocked-by type status @matt #labels
+		expect(r.text).not.toContain('status:in-progress');
+		expect(r.text).toContain('part-of:002');
+		expect(r.text).toContain('blocked-by:004');
+		expect(r.text).toContain('@matt');
+		expect(r.text).toContain('#parser #round-trip');
+	});
+});
+
+describe('T4 reads — list compact markers (§5 decision 17)', () => {
+	it('marks a blocked issue with ⊘', () => {
+		expect(run(BLOCKED, ['list']).output).toContain('⊘ 002');
+	});
+
+	it('shows status:/@assignee/#labels inline', () => {
+		const out = run(ANNOTATED, ['list']).output;
+		expect(out).toContain('status:in-progress');
+		expect(out).toContain('@matt');
+		expect(out).toContain('#parser');
+	});
+
+	it('shares the frontier filter vocabulary (§5 decision 18)', () => {
+		const out = run(T4, ['list', '--label', 'frontend']).output;
+		expect(out).toContain('002');
+		expect(out).toContain('004');
+		expect(out).not.toContain('003');
+	});
+});
+
+describe('T4 reads — show full dossier (§5 decision 17)', () => {
+	it('expands relationships with titles + state and derives ⊘ blocked', () => {
+		const out = run(ANNOTATED, ['show', '007']).output;
+		expect(out).toContain('⊘ blocked'); // blocked-by:004, 004 open
+		expect(out).toContain('status: in-progress');
+		expect(out).toContain('assignee: @matt');
+		expect(out).toContain('labels: #parser #round-trip');
+		expect(out).toMatch(/part-of: 002/);
+		expect(out).toMatch(/blocked-by: 004 \(A blocker\.\) — open/);
+	});
+
+	it('--children renders the containment subtree', () => {
+		const out = run(T4, ['show', '001', '--children']).output;
+		expect(out).toContain('children:');
+		expect(out).toContain('002');
+		expect(out).toContain('003');
+	});
+
+	it('resolves a dangling pointer as (not found)', () => {
+		const out = run(GRAPH, ['show', '003']).output; // 003 part-of:998 (dangling)
+		expect(out).toMatch(/part-of: 998 \(not found\)/);
+	});
+});
+
+describe('T4 reads — tree containment-only forest (§5 decision 13)', () => {
+	it('nests children under their parent by part-of', () => {
+		const out = cmdTree(parse(T4));
+		const lines = out.split('\n');
+		const p = lines.findIndex((l) => /\b001\b/.test(l));
+		const c = lines.findIndex((l) => /\b002\b/.test(l));
+		expect(p).toBeGreaterThanOrEqual(0);
+		expect(c).toBeGreaterThan(p);
+		// child is indented deeper than its parent
+		const indent = (l: string) => l.length - l.trimStart().length;
+		expect(indent(lines[c]!)).toBeGreaterThan(indent(lines[p]!));
+	});
+
+	it('draws blocking as a ⊘ annotation, never as tree structure', () => {
+		const out = cmdTree(parse(BLOCKED));
+		const lines = out.split('\n');
+		const indent = (l: string) => l.length - l.trimStart().length;
+		const a = lines.find((l) => /\b001\b/.test(l))!;
+		const b = lines.find((l) => /\b002\b/.test(l))!; // 002 blocked-by:001
+		expect(b).toContain('⊘');
+		// 002 is NOT a child of 001 (no part-of) — same depth, both roots
+		expect(indent(a)).toBe(indent(b));
+	});
+});
+
+describe('T4 doctor — read-only linter (§5 decision 19)', () => {
+	it('reports every §3 anomaly and exits nonzero on findings', () => {
+		const r = run(GRAPH, ['doctor']);
+		expect(r.exitCode).toBe(1);
+		expect(r.output).toMatch(/self-ref/i);
+		expect(r.output).toMatch(/cycle/i);
+		expect(r.mutated).toBe(false);
+	});
+
+	it('exits 0 on a clean file', () => {
+		const r = run(SAMPLE, ['doctor']);
+		expect(r.exitCode).toBe(0);
+		expect(r.output).toMatch(/clean/i);
+	});
+
+	it('flags a status outside a declared statuses: set', () => {
+		const declared = `---\nnext_id: 2\npattern: "###"\nstatuses: ready, wip\n---\n# T\n\n## Issues\n\n- [ ] 001: A. status:banana\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(doctorFindings(parse(declared), declared).some((f) => /banana/.test(f))).toBe(true);
+	});
+
+	it('flags a structurally malformed line', () => {
+		const bad = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A.\nthis is not an issue line\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(doctorFindings(parse(bad), bad).some((f) => /malformed/.test(f))).toBe(true);
+	});
+});
+
+describe('T4 --json read contract (§6)', () => {
+	it('ready --json carries derived blocked/takeable and a null reason when non-empty', () => {
+		const data = JSON.parse(run(T4, ['ready', '--json']).output);
+		expect(Array.isArray(data.issues)).toBe(true);
+		expect(data.reason).toBeNull();
+		const first = data.issues[0];
+		expect(first).toMatchObject({ id: '001', blocked: false, takeable: true });
+	});
+
+	it('ready --json reports the frontier reason when empty', () => {
+		const claimed = `---\nnext_id: 3\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A. @matt\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const data = JSON.parse(run(claimed, ['ready', '--json']).output);
+		expect(data.issues).toEqual([]);
+		expect(data.reason).toMatch(/in progress/i);
+	});
+
+	it('next --json leads with the issue object (or null + reason)', () => {
+		const data = JSON.parse(run(BLOCKED, ['next', '--json']).output);
+		expect(data.issue.id).toBe('001');
+		expect(data.reason).toBeNull();
+	});
+
+	it('show --json expands relationships and derived state', () => {
+		const data = JSON.parse(run(ANNOTATED, ['show', '007', '--json']).output);
+		expect(data).toMatchObject({ id: '007', blocked: true, takeable: false });
+		expect(data.parent.id).toBe('002');
+		expect(data.blockers[0]).toMatchObject({ id: '004', open: true });
+	});
+
+	it('tree --json is a nested forest', () => {
+		const data = JSON.parse(run(T4, ['tree', '--json']).output);
+		const root = data.find((n: { id: string }) => n.id === '001');
+		expect(root.children.map((c: { id: string }) => c.id)).toEqual(['002', '003']);
+	});
+
+	it('list --json is a flat array of issue objects with derived fields', () => {
+		const data = JSON.parse(run(SAMPLE, ['list', '--json']).output);
+		expect(data.every((i: { id: string; takeable: boolean }) => 'takeable' in i)).toBe(true);
+	});
+
+	it('doctor --json emits ok + findings', () => {
+		const data = JSON.parse(run(GRAPH, ['doctor', '--json']).output);
+		expect(data.ok).toBe(false);
+		expect(data.findings.length).toBeGreaterThan(0);
+	});
+});
+
+describe('T4 advisories, quiet, and exit codes (§5 decisions 8, 10)', () => {
+	it('graph-reading commands surface §3 advisories to the warnings channel', () => {
+		expect(run(GRAPH, ['list']).warnings.length).toBeGreaterThan(0);
+		expect(run(GRAPH, ['tree']).warnings.length).toBeGreaterThan(0);
+	});
+
+	it('-q / --quiet silences the advisory channel', () => {
+		expect(run(GRAPH, ['ready', '-q']).warnings).toEqual([]);
+		expect(run(GRAPH, ['ready', '--quiet']).warnings).toEqual([]);
+	});
+
+	it('-q drops the folded-in advisories from a show dossier too (decision 8)', () => {
+		// The `! …edge ignored` advisory line is silenced; the resolved blocked-by line
+		// (structural dossier content) is not — only the §3 warning channel is quieted.
+		expect(run(GRAPH, ['show', '001']).output).toMatch(/edge ignored/i); // 001 blocked-by:001
+		expect(run(GRAPH, ['show', '001', '-q']).output).not.toMatch(/edge ignored/i);
+		expect(JSON.parse(run(GRAPH, ['show', '001', '-q', '--json']).output).warnings).toEqual([]);
+	});
+
+	it('an empty frontier is exit 0 (never an error, §4.5)', () => {
+		const claimed = `---\nnext_id: 3\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A. @matt\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(run(claimed, ['next']).exitCode ?? 0).toBe(0);
+	});
+
+	it('help documents the full T4 surface', () => {
+		const out = run(SAMPLE, ['help']).output;
+		for (const verb of ['block', 'assign', 'label', 'set', 'tree', 'doctor']) {
+			expect(out).toContain(verb);
+		}
+	});
+});
+
+describe('T4 isTakeable — the per-issue frontier predicate (§6)', () => {
+	it('is true only for an open, unblocked, unclaimed issue', () => {
+		const doc = parse(T4);
+		expect(isTakeable(doc, findIssue(doc, '001')!.issue, 'Issues')).toBe(true);
+		expect(isTakeable(doc, findIssue(doc, '004')!.issue, 'Issues')).toBe(false); // claimed
+		expect(isTakeable(doc, findIssue(doc, '005')!.issue, 'Issues')).toBe(false); // blocked
+		expect(isTakeable(doc, findIssue(doc, '007')!.issue, 'Completed')).toBe(false); // closed
 	});
 });

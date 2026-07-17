@@ -252,11 +252,23 @@ function today() {
   const pad = (n) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
-function cmdAdd(doc, title, note) {
+function cmdAdd(doc, title, note, fields = {}) {
   const id = formatId(doc.nextId, doc.pattern);
   const detail = note ? note.split(`
 `).map((l) => l.trimStart()) : [];
-  doc.sections.get(OPEN_SECTION).push({ id, num: doc.nextId, checked: false, title, blockedBy: [], labels: [], uda: [], detail });
+  doc.sections.get(OPEN_SECTION).push({
+    id,
+    num: doc.nextId,
+    checked: false,
+    title,
+    partOf: fields.partOf ? normalizeId(fields.partOf, doc.pattern) : undefined,
+    blockedBy: (fields.blockedBy ?? []).map((b) => normalizeId(b, doc.pattern)).filter((b) => b !== id),
+    status: fields.status,
+    assignee: fields.assignee,
+    labels: fields.labels ?? [],
+    uda: [],
+    detail
+  });
   doc.nextId += 1;
   return `Added ${id}: ${title}`;
 }
@@ -267,6 +279,7 @@ function cmdDone(doc, idInput, target = DONE_SECTION) {
   const issue = move(doc, found, target);
   issue.checked = CHECKED_SECTIONS.has(target);
   issue.date = today();
+  issue.status = undefined;
   return `${issue.id} → ${target} (${issue.date})`;
 }
 function cmdReopen(doc, idInput) {
@@ -290,41 +303,256 @@ function cmdNote(doc, idInput, text) {
     issue.detail.push(l.trimStart());
   return `${issue.id} note added`;
 }
-function cmdShow(doc, idInput) {
+function cmdBlock(doc, idInput, byInput) {
+  const { issue } = requireIssue(doc, idInput);
+  const by = normalizeId(byInput, doc.pattern);
+  if (by === issue.id)
+    throw new Error(`${issue.id}: cannot block on itself.`);
+  const cur = issue.blockedBy.map((b) => normalizeId(b, doc.pattern));
+  if (cur.includes(by))
+    return `${issue.id} already blocked-by ${by}`;
+  issue.blockedBy = [...cur, by];
+  return `${issue.id} blocked-by ${by}`;
+}
+function cmdUnblock(doc, idInput, byInput) {
+  const { issue } = requireIssue(doc, idInput);
+  if (byInput === undefined) {
+    if (!issue.blockedBy.length)
+      return `${issue.id} has no blockers`;
+    issue.blockedBy = [];
+    return `${issue.id} unblocked (all)`;
+  }
+  const by = normalizeId(byInput, doc.pattern);
+  const cur = issue.blockedBy.map((b) => normalizeId(b, doc.pattern));
+  if (!cur.includes(by))
+    return `${issue.id} was not blocked-by ${by}`;
+  issue.blockedBy = cur.filter((b) => b !== by);
+  return `${issue.id} no longer blocked-by ${by}`;
+}
+function cmdAssign(doc, idInput, who) {
+  const { issue } = requireIssue(doc, idInput);
+  issue.assignee = who;
+  return `${issue.id} assigned to @${who}`;
+}
+function cmdUnassign(doc, idInput) {
+  const { issue } = requireIssue(doc, idInput);
+  if (!issue.assignee)
+    return `${issue.id} was not assigned`;
+  const who = issue.assignee;
+  issue.assignee = undefined;
+  return `${issue.id} unassigned (@${who})`;
+}
+function cmdLabel(doc, idInput, names) {
+  const { issue } = requireIssue(doc, idInput);
+  const added = [];
+  for (const n of names)
+    if (n && !issue.labels.includes(n))
+      added.push(n);
+  issue.labels.push(...added);
+  if (!added.length)
+    return `${issue.id}: no new labels`;
+  return `${issue.id} labelled ${added.map((l) => "#" + l).join(" ")}`;
+}
+function cmdUnlabel(doc, idInput, names) {
+  const { issue } = requireIssue(doc, idInput);
+  const removed = [];
+  for (const n of names) {
+    const i = issue.labels.indexOf(n);
+    if (i !== -1) {
+      issue.labels.splice(i, 1);
+      removed.push(n);
+    }
+  }
+  if (!removed.length)
+    return `${issue.id}: no matching labels`;
+  return `${issue.id} unlabelled ${removed.map((l) => "#" + l).join(" ")}`;
+}
+function cmdSet(doc, idInput, key, value) {
+  const { section, issue } = requireIssue(doc, idInput);
+  const warnings = [];
+  switch (key) {
+    case "status": {
+      issue.status = value;
+      if (section !== OPEN_SECTION)
+        warnings.push(`${issue.id}: status set on a closed issue — open-only per §2.2`);
+      const declared = declaredStatuses(doc);
+      if (declared && !declared.has(value))
+        warnings.push(`${issue.id}: status:${value} is not in the declared statuses`);
+      break;
+    }
+    case "part-of":
+      issue.partOf = normalizeId(value, doc.pattern);
+      break;
+    case "assignee":
+      issue.assignee = value;
+      break;
+    case "blocked-by":
+      issue.blockedBy = value.split(",").map((v) => normalizeId(v.trim(), doc.pattern)).filter((b) => b && b !== issue.id);
+      break;
+    case "label":
+      issue.labels = value.split(",").map((s) => s.trim()).filter(Boolean);
+      break;
+    default: {
+      const existing = issue.uda.find((u) => u.key === key);
+      if (existing)
+        existing.value = value;
+      else
+        issue.uda.push({ key, value });
+    }
+  }
+  return { message: `${issue.id} set ${key}:${value}`, warnings };
+}
+function cmdUnset(doc, idInput, key) {
+  const { issue } = requireIssue(doc, idInput);
+  const noop = `${issue.id}: ${key} was not set`;
+  switch (key) {
+    case "status":
+      if (!issue.status)
+        return noop;
+      issue.status = undefined;
+      break;
+    case "part-of":
+      if (!issue.partOf)
+        return noop;
+      issue.partOf = undefined;
+      break;
+    case "assignee":
+      if (!issue.assignee)
+        return noop;
+      issue.assignee = undefined;
+      break;
+    case "blocked-by":
+      if (!issue.blockedBy.length)
+        return noop;
+      issue.blockedBy = [];
+      break;
+    case "label":
+      if (!issue.labels.length)
+        return noop;
+      issue.labels = [];
+      break;
+    default: {
+      const i = issue.uda.findIndex((u) => u.key === key);
+      if (i === -1)
+        return noop;
+      issue.uda.splice(i, 1);
+    }
+  }
+  return `${issue.id} unset ${key}`;
+}
+function declaredStatuses(doc) {
+  const entry = doc.frontmatter.find((e) => e.key === "statuses");
+  if (!entry)
+    return null;
+  const raw = entry.raw.replace(/^["']|["']$/g, "");
+  const vals = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+  return vals.length ? new Set(vals) : null;
+}
+function warningsFor(doc, idInput) {
+  const id = normalizeId(idInput, doc.pattern);
+  return graphWarnings(doc).filter((w) => w.includes(id));
+}
+function cmdShow(doc, idInput, opts = {}) {
   const { section, issue } = requireIssue(doc, idInput);
   const mark = issue.checked ? " [x]" : "";
   const date = issue.date ? ` (${issue.date})` : "";
-  const lines = [`${issue.id} — ${section}${mark}${date}`, issue.title];
+  const blk = isBlocked(doc, issue) ? " ⊘ blocked" : "";
+  const lines = [`${issue.id} — ${section}${mark}${date}${blk}`, issue.title];
+  if (issue.status)
+    lines.push(`  status: ${issue.status}`);
+  if (issue.assignee)
+    lines.push(`  assignee: @${issue.assignee}`);
+  if (issue.labels.length)
+    lines.push(`  labels: ${issue.labels.map((l) => "#" + l).join(" ")}`);
+  if (issue.partOf)
+    lines.push(`  part-of: ${resolveRef(doc, issue.partOf)}`);
+  for (const b of issue.blockedBy)
+    lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id)}`);
+  for (const u of issue.uda)
+    lines.push(`  ${u.key}: ${u.value}`);
   for (const d of issue.detail)
     lines.push(`    ${d}`);
+  if (opts.children) {
+    const kids = childrenOf(doc, issue.id);
+    if (kids.length) {
+      lines.push("  children:");
+      for (const k of kids)
+        lines.push(...treeLines(doc, k, 2));
+    }
+  }
+  if (!opts.quiet)
+    for (const w of warningsFor(doc, issue.id))
+      lines.push(`  ! ${w}`);
   return lines.join(`
 `);
 }
-function cmdList(doc, opts = {}) {
-  let names;
-  if (opts.all)
-    names = [...SECTION_ORDER];
-  else {
-    const set = new Set;
-    if (opts.closed)
-      [DONE_SECTION, DEFER_SECTION, WONTFIX_SECTION].forEach((s) => set.add(s));
-    if (opts.deferred)
-      set.add(DEFER_SECTION);
-    if (opts.wontfix)
-      set.add(WONTFIX_SECTION);
-    names = set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
+function resolveRef(doc, rawId, selfId) {
+  const id = normalizeId(rawId, doc.pattern);
+  if (selfId && id === selfId)
+    return `${id} (self-reference — ignored)`;
+  const found = findIssue(doc, id);
+  if (!found)
+    return `${id} (not found)`;
+  const state = found.section === OPEN_SECTION ? "open" : found.section.toLowerCase();
+  return `${id} (${found.issue.title}) — ${state}`;
+}
+function markers(issue) {
+  let s = "";
+  if (issue.status)
+    s += ` status:${issue.status}`;
+  if (issue.assignee)
+    s += ` @${issue.assignee}`;
+  for (const l of issue.labels)
+    s += ` #${l}`;
+  return s;
+}
+function listRow(doc, it) {
+  const flag = isBlocked(doc, it) ? "⊘ " : "";
+  const date = it.date ? ` (${it.date})` : "";
+  const more = it.detail.length ? " …" : "";
+  return `  ${flag}${it.id}  ${it.title}${markers(it)}${date}${more}`;
+}
+function passesFilters(doc, it, filters) {
+  if (filters.status?.length && (!it.status || !filters.status.includes(it.status)))
+    return false;
+  if (filters.label?.length && !it.labels.some((l) => filters.label.includes(l)))
+    return false;
+  if (filters.parent?.length) {
+    const p = it.partOf ? normalizeId(it.partOf, doc.pattern) : undefined;
+    const want = filters.parent.map((x) => normalizeId(x, doc.pattern));
+    if (!p || !want.includes(p))
+      return false;
   }
+  return true;
+}
+function listFilter(doc, it, filters) {
+  if (!passesFilters(doc, it, filters))
+    return false;
+  if (filters.assignee?.length && (!it.assignee || !filters.assignee.includes(it.assignee)))
+    return false;
+  return true;
+}
+function listSections(opts) {
+  if (opts.all)
+    return [...SECTION_ORDER];
+  const set = new Set;
+  if (opts.closed)
+    [DONE_SECTION, DEFER_SECTION, WONTFIX_SECTION].forEach((s) => set.add(s));
+  if (opts.deferred)
+    set.add(DEFER_SECTION);
+  if (opts.wontfix)
+    set.add(WONTFIX_SECTION);
+  return set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
+}
+function cmdList(doc, opts = {}, filters = {}) {
+  const names = listSections(opts);
   const blocks = [];
   for (const name of names) {
-    const issues = doc.sections.get(name) ?? [];
+    const issues = (doc.sections.get(name) ?? []).filter((it) => listFilter(doc, it, filters));
     if (!issues.length)
       continue;
     const header = names.length > 1 ? `${name}:` : "";
-    const rows = issues.map((it) => {
-      const date = it.date ? ` (${it.date})` : "";
-      const more = it.detail.length ? " …" : "";
-      return `  ${it.id}  ${it.title}${date}${more}`;
-    });
+    const rows = issues.map((it) => listRow(doc, it));
     blocks.push((header ? header + `
 ` : "") + rows.join(`
 `));
@@ -434,9 +662,6 @@ function rotateToMin(cycle) {
 }
 function frontier(doc, filters = {}) {
   const wantAssignee = filters.assignee && filters.assignee.length ? filters.assignee : undefined;
-  const wantStatus = filters.status && filters.status.length ? filters.status : undefined;
-  const wantLabel = filters.label && filters.label.length ? filters.label : undefined;
-  const wantParent = filters.parent && filters.parent.length ? filters.parent.map((p) => normalizeId(p, doc.pattern)) : undefined;
   let items = (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => {
     if (isBlocked(doc, it))
       return false;
@@ -445,20 +670,14 @@ function frontier(doc, filters = {}) {
         return false;
     } else if (it.assignee)
       return false;
-    if (wantStatus && (!it.status || !wantStatus.includes(it.status)))
-      return false;
-    if (wantLabel && !it.labels.some((l) => wantLabel.includes(l)))
-      return false;
-    if (wantParent) {
-      const p = it.partOf ? normalizeId(it.partOf, doc.pattern) : undefined;
-      if (!p || !wantParent.includes(p))
-        return false;
-    }
-    return true;
+    return passesFilters(doc, it, filters);
   });
   if (filters.limit !== undefined && filters.limit >= 0)
     items = items.slice(0, filters.limit);
   return items;
+}
+function isTakeable(doc, issue, section) {
+  return section === OPEN_SECTION && !issue.assignee && !isBlocked(doc, issue);
 }
 function frontierRow(it) {
   const more = it.detail.length ? " …" : "";
@@ -508,8 +727,182 @@ function openBlockersOf(doc, blocked) {
   }
   return waiting;
 }
-var VALUE_FLAGS = new Set(["note", "status", "label", "parent", "assignee", "limit"]);
-var REPEATABLE_FLAGS = new Set(["status", "label", "parent", "assignee"]);
+function allEntries(doc) {
+  const out = [];
+  for (const name of SECTION_ORDER)
+    for (const it of doc.sections.get(name) ?? [])
+      out.push({ section: name, issue: it });
+  return out;
+}
+function validParentId(doc, issue) {
+  if (!issue.partOf)
+    return;
+  const p = normalizeId(issue.partOf, doc.pattern);
+  return findIssue(doc, p) ? p : undefined;
+}
+function childrenOf(doc, parentId) {
+  const pid = normalizeId(parentId, doc.pattern);
+  return allEntries(doc).filter((e) => validParentId(doc, e.issue) === pid).map((e) => e.issue);
+}
+function rootsOf(doc) {
+  return allEntries(doc).filter((e) => !validParentId(doc, e.issue)).map((e) => e.issue);
+}
+function treeLines(doc, issue, depth, seen = new Set) {
+  const indent = "  ".repeat(depth + 1);
+  if (seen.has(issue.id))
+    return [`${indent}${issue.id} (part-of cycle)`];
+  seen.add(issue.id);
+  const flag = isBlocked(doc, issue) ? "⊘ " : "";
+  const found = findIssue(doc, issue.id);
+  const tag = found && found.section !== OPEN_SECTION ? ` [${found.section}]` : "";
+  const out = [`${indent}${flag}${issue.id}  ${issue.title}${markers(issue)}${tag}`];
+  for (const k of childrenOf(doc, issue.id))
+    out.push(...treeLines(doc, k, depth + 1, seen));
+  return out;
+}
+function cmdTree(doc) {
+  const roots = rootsOf(doc);
+  if (!roots.length)
+    return "No issues.";
+  const seen = new Set;
+  const lines = [];
+  for (const r of roots)
+    lines.push(...treeLines(doc, r, 0, seen));
+  return lines.join(`
+`);
+}
+function doctorFindings(doc, text) {
+  const out = [...graphWarnings(doc)];
+  const declared = declaredStatuses(doc);
+  if (declared) {
+    for (const { issue } of allEntries(doc))
+      if (issue.status && !declared.has(issue.status))
+        out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
+  }
+  out.push(...malformedLines(text));
+  return out;
+}
+function malformedLines(text) {
+  const out = [];
+  let inSection = false;
+  for (const line of text.split(`
+`)) {
+    if (/^## /.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection || line.trim() === "")
+      continue;
+    if (ISSUE_RE.test(line) || /^\s+/.test(line))
+      continue;
+    out.push(`malformed line (not an issue or note): ${line.trim()}`);
+  }
+  return out;
+}
+function cmdDoctor(doc, text) {
+  const findings = doctorFindings(doc, text);
+  if (!findings.length)
+    return "No issues found — clean.";
+  const lines = [`${findings.length} finding${findings.length === 1 ? "" : "s"}:`];
+  for (const f of findings)
+    lines.push(`  · ${f}`);
+  return lines.join(`
+`);
+}
+function issueJson(doc, issue, section) {
+  return {
+    id: issue.id,
+    title: issue.title,
+    section,
+    status: issue.status ?? null,
+    assignee: issue.assignee ?? null,
+    labels: issue.labels,
+    blockedBy: issue.blockedBy.map((b) => normalizeId(b, doc.pattern)),
+    partOf: issue.partOf ? normalizeId(issue.partOf, doc.pattern) : null,
+    blocked: isBlocked(doc, issue),
+    takeable: isTakeable(doc, issue, section)
+  };
+}
+function cmdListJson(doc, opts = {}, filters = {}) {
+  const items = [];
+  for (const name of listSections(opts))
+    for (const it of doc.sections.get(name) ?? [])
+      if (listFilter(doc, it, filters))
+        items.push(issueJson(doc, it, name));
+  return items;
+}
+function cmdReadyJson(doc, filters = {}) {
+  const items = frontier(doc, filters);
+  return {
+    issues: items.map((it) => issueJson(doc, it, OPEN_SECTION)),
+    reason: items.length ? null : diagnoseEmpty(doc, filters)
+  };
+}
+function cmdNextJson(doc, filters = {}) {
+  const top = frontier(doc, { ...filters, limit: undefined })[0];
+  return {
+    issue: top ? issueJson(doc, top, OPEN_SECTION) : null,
+    reason: top ? null : diagnoseEmpty(doc, filters)
+  };
+}
+function refJson(doc, rawId) {
+  const id = normalizeId(rawId, doc.pattern);
+  const found = findIssue(doc, id);
+  return {
+    id,
+    title: found ? found.issue.title : null,
+    section: found ? found.section : null,
+    open: found ? found.section === OPEN_SECTION : false,
+    found: !!found
+  };
+}
+function treeJson(doc, issues, seen = new Set) {
+  const out = [];
+  for (const it of issues) {
+    if (seen.has(it.id))
+      continue;
+    seen.add(it.id);
+    const found = findIssue(doc, it.id);
+    out.push({
+      ...issueJson(doc, it, found ? found.section : OPEN_SECTION),
+      children: treeJson(doc, childrenOf(doc, it.id), seen)
+    });
+  }
+  return out;
+}
+function cmdTreeJson(doc) {
+  return treeJson(doc, rootsOf(doc));
+}
+function cmdShowJson(doc, idInput, opts = {}) {
+  const { section, issue } = requireIssue(doc, idInput);
+  const base = issueJson(doc, issue, section);
+  const result = {
+    ...base,
+    parent: issue.partOf ? refJson(doc, issue.partOf) : null,
+    blockers: issue.blockedBy.map((b) => refJson(doc, b)),
+    detail: issue.detail,
+    warnings: opts.quiet ? [] : warningsFor(doc, issue.id)
+  };
+  if (opts.children)
+    result.children = treeJson(doc, childrenOf(doc, issue.id));
+  return result;
+}
+function cmdDoctorJson(doc, text) {
+  const findings = doctorFindings(doc, text);
+  return { ok: findings.length === 0, findings };
+}
+var VALUE_FLAGS = new Set([
+  "note",
+  "status",
+  "label",
+  "parent",
+  "assignee",
+  "limit",
+  "by",
+  "part-of",
+  "blocked-by"
+]);
+var REPEATABLE_FLAGS = new Set(["status", "label", "parent", "assignee", "blocked-by"]);
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
@@ -526,7 +919,9 @@ function parseArgs(argv) {
   };
   for (let i = 0;i < argv.length; i++) {
     const tok = argv[i] ?? "";
-    if (tok.startsWith("--")) {
+    if (tok === "-q") {
+      flags.quiet = true;
+    } else if (tok.startsWith("--")) {
       const body = tok.slice(2);
       const eq = body.indexOf("=");
       if (eq !== -1)
@@ -541,8 +936,18 @@ function parseArgs(argv) {
   }
   return { positionals, flags };
 }
+function commaList(v) {
+  if (v === undefined)
+    return [];
+  const arr = Array.isArray(v) ? v : [String(v)];
+  return arr.flatMap((s) => String(s).split(",")).map((s) => s.trim()).filter(Boolean);
+}
+function firstStr(v) {
+  const list = commaList(v);
+  return list.length ? list[0] : undefined;
+}
 function readFilters(flags) {
-  const arr = (v) => v === undefined ? undefined : Array.isArray(v) ? v : [String(v)];
+  const arr = (v) => v === undefined ? undefined : commaList(v);
   const limit = typeof flags.limit === "string" ? Number(flags.limit) : undefined;
   return {
     status: arr(flags.status),
@@ -554,16 +959,27 @@ function readFilters(flags) {
 }
 var HELP = `Usage: issues <command> [args]
 
-  list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
-  next                                                the topmost takeable issue
-  ready                                               the whole takeable frontier
-  add "<title>" [--note "<text>"]                     add a new open issue
-  done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
-  reopen <id>                                         move an issue back to open
-  show <id>                                           print an issue with its note
-  edit <id> "<title>"                                 replace an issue's title
-  note <id> "<text>"                                  append a line to an issue's note
-  help                                               show this message`;
+Reads (add --json for the machine contract; -q silences advisories):
+  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  next   [filters]                                       the topmost takeable issue
+  ready  [filters] [--limit N]                           the whole takeable frontier
+  show <id> [--children]                                 full resolved dossier
+  tree                                                   containment forest (⊘ = blocked)
+  doctor                                                 lint the file (exit nonzero on findings)
+
+Mutations:
+  add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
+                [--status <s>] [--assignee <who>] [--label <name[,name]>]
+  block <id> --by <blocker>        unblock <id> [--by <blocker>]   (no --by clears all)
+  assign <id> <who>                unassign <id>
+  label <id> <name[,name]>         unlabel <id> <name[,name]>
+  set <id> <key>:<value>           unset <id> <key>
+  done <id> [--defer|--wontfix]    reopen <id>
+  edit <id> "<title>"              note <id> "<text>"
+  help                                                   show this message
+
+filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+         (AND across dimensions, OR within a repeated/comma-listed dimension)`;
 function result(fields) {
   return { warnings: [], ...fields };
 }
@@ -581,37 +997,104 @@ function run(text, argv) {
       throw new Error(`${cmd}: missing <${label}>`);
     return v;
   };
+  const quiet = !!flags.quiet;
+  const wantJson = !!flags.json;
+  const jsonOut = (d) => JSON.stringify(d, null, 2);
+  const advisories = () => quiet ? [] : graphWarnings(doc);
+  const edgeAdvisories = (id) => quiet ? [] : warningsFor(doc, id);
   switch (cmd) {
-    case "list":
-      return result({
-        text,
-        mutated: false,
-        output: cmdList(doc, {
-          all: !!flags.all,
-          closed: !!flags.closed,
-          deferred: !!flags.deferred,
-          wontfix: !!flags.wontfix
-        })
-      });
-    case "next":
-      return result({
-        text,
-        mutated: false,
-        output: cmdNext(doc, readFilters(flags)),
-        warnings: graphWarnings(doc)
-      });
-    case "ready":
-      return result({
-        text,
-        mutated: false,
-        output: cmdReady(doc, readFilters(flags)),
-        warnings: graphWarnings(doc)
-      });
-    case "show":
-      return result({ text, mutated: false, output: cmdShow(doc, need(1, "id")) });
+    case "list": {
+      const opts = {
+        all: !!flags.all,
+        closed: !!flags.closed,
+        deferred: !!flags.deferred,
+        wontfix: !!flags.wontfix
+      };
+      const filters = readFilters(flags);
+      const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters);
+      return result({ text, mutated: false, output, warnings: advisories() });
+    }
+    case "next": {
+      const filters = readFilters(flags);
+      const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters);
+      return result({ text, mutated: false, output, warnings: advisories() });
+    }
+    case "ready": {
+      const filters = readFilters(flags);
+      const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters);
+      return result({ text, mutated: false, output, warnings: advisories() });
+    }
+    case "show": {
+      const id = need(1, "id");
+      const opts = { children: !!flags.children, quiet };
+      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts);
+      return result({ text, mutated: false, output });
+    }
+    case "tree": {
+      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc);
+      return result({ text, mutated: false, output, warnings: advisories() });
+    }
+    case "doctor": {
+      const findings = doctorFindings(doc, text);
+      const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text);
+      return result({ text, mutated: false, output, exitCode: findings.length ? 1 : 0 });
+    }
     case "add": {
       const note = typeof flags.note === "string" ? flags.note : undefined;
-      const msg = cmdAdd(doc, need(1, "title"), note);
+      const newId = formatId(doc.nextId, doc.pattern);
+      const msg = cmdAdd(doc, need(1, "title"), note, {
+        partOf: firstStr(flags["part-of"]),
+        blockedBy: commaList(flags["blocked-by"]),
+        status: firstStr(flags.status),
+        assignee: firstStr(flags.assignee),
+        labels: commaList(flags.label)
+      });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(newId) });
+    }
+    case "block": {
+      const id = need(1, "id");
+      const by = firstStr(flags.by);
+      if (!by)
+        throw new Error("block: missing --by <blocker>");
+      const msg = cmdBlock(doc, id, by);
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(id) });
+    }
+    case "unblock": {
+      const msg = cmdUnblock(doc, need(1, "id"), firstStr(flags.by));
+      return result({ text: serialize(doc), output: msg, mutated: true });
+    }
+    case "assign": {
+      const msg = cmdAssign(doc, need(1, "id"), need(2, "who"));
+      return result({ text: serialize(doc), output: msg, mutated: true });
+    }
+    case "unassign": {
+      const msg = cmdUnassign(doc, need(1, "id"));
+      return result({ text: serialize(doc), output: msg, mutated: true });
+    }
+    case "label": {
+      const msg = cmdLabel(doc, need(1, "id"), commaList(need(2, "name")));
+      return result({ text: serialize(doc), output: msg, mutated: true });
+    }
+    case "unlabel": {
+      const msg = cmdUnlabel(doc, need(1, "id"), commaList(need(2, "name")));
+      return result({ text: serialize(doc), output: msg, mutated: true });
+    }
+    case "set": {
+      const id = need(1, "id");
+      const kv = need(2, "key:value");
+      const m = kv.match(/^([^:]+):([\s\S]*)$/);
+      if (!m)
+        throw new Error(`set: expected <key>:<value>, got "${kv}"`);
+      const { message, warnings } = cmdSet(doc, id, m[1], m[2]);
+      return result({
+        text: serialize(doc),
+        output: message,
+        mutated: true,
+        warnings: quiet ? [] : warnings
+      });
+    }
+    case "unset": {
+      const msg = cmdUnset(doc, need(1, "id"), need(2, "key"));
       return result({ text: serialize(doc), output: msg, mutated: true });
     }
     case "done": {
@@ -643,18 +1126,36 @@ export {
   run,
   parse,
   normalizeId,
+  isTakeable,
   isBlocked,
   graphWarnings,
   frontier,
   formatId,
   findIssue,
+  doctorFindings,
+  cmdUnset,
+  cmdUnlabel,
+  cmdUnblock,
+  cmdUnassign,
+  cmdTreeJson,
+  cmdTree,
+  cmdShowJson,
   cmdShow,
+  cmdSet,
   cmdReopen,
+  cmdReadyJson,
   cmdReady,
   cmdNote,
+  cmdNextJson,
   cmdNext,
+  cmdListJson,
   cmdList,
+  cmdLabel,
   cmdEdit,
   cmdDone,
+  cmdDoctorJson,
+  cmdDoctor,
+  cmdBlock,
+  cmdAssign,
   cmdAdd
 };

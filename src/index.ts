@@ -5,15 +5,15 @@
  * the ISSUES.md text. The thin CLI shell that reads and writes the file lives in
  * `./bin.ts`.
  *
- * Commands (dispatched by `run`):
- *   list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
- *   add "<title>" [--note "<text>"]                     add a new open issue
- *   done <id> [--defer] [--wontfix]                     close/defer/wontfix an issue
- *   reopen <id>                                         move an issue back to open
- *   show <id>                                           print an issue with its note
- *   edit <id> "<title>"                                 replace an issue's title
- *   note <id> "<text>"                                  append a line to an issue's note
- *   help                                               show usage
+ * Commands (dispatched by `run`) — reads take `--json` (§6) and `-q`:
+ *   list [section flags] [filters]   list issues (default: open), with ⊘/@/# markers
+ *   next / ready [filters]           the takeable frontier (topmost / whole list)
+ *   show <id> [--children]           full resolved dossier
+ *   tree                             containment-only forest (blocking as a ⊘ annotation)
+ *   doctor                           read-only linter (exits nonzero on findings)
+ *   add "<title>" [--note] [--part-of] [--blocked-by] [--status] [--assignee] [--label]
+ *   block/unblock · assign/unassign · label/unlabel · set/unset   field mutations
+ *   done <id> [--defer|--wontfix] · reopen · edit · note · help
  *
  * The file stays human-editable Markdown. Frontmatter and preamble prose are
  * preserved verbatim; section bodies are regenerated deterministically so an
@@ -335,14 +335,39 @@ export function today(): string {
 }
 
 // ── Commands (mutate doc in place, return a user-facing message) ─────────────
-export function cmdAdd(doc: Doc, title: string, note?: string): string {
+// Optional field flags for `add`, mapping 1:1 onto the mutation verbs (§5 decision
+// 2). Set on the new issue directly; `serialize` re-emits them in canonical tail
+// order, so `add --blocked-by X --label a,b` is byte-identical to the equivalent
+// `add` + `block` + `label` verb sequence.
+export interface AddFields {
+	partOf?: string;
+	blockedBy?: string[];
+	status?: string;
+	assignee?: string;
+	labels?: string[];
+}
+
+export function cmdAdd(doc: Doc, title: string, note?: string, fields: AddFields = {}): string {
 	const id = formatId(doc.nextId, doc.pattern);
 	const detail = note ? note.split('\n').map((l) => l.trimStart()) : [];
 	// A bare `add` writes no tail fields — no `status:`, no sigils — so a
-	// metadata-free file stays byte-identical (§2.2, §8). Field flags arrive in T4.
-	doc.sections
-		.get(OPEN_SECTION)!
-		.push({ id, num: doc.nextId, checked: false, title, blockedBy: [], labels: [], uda: [], detail });
+	// metadata-free file stays byte-identical (§2.2, §8). Field flags (§5 decision 2)
+	// are stored normalized (ids canonicalized) to match the verbs' write form.
+	doc.sections.get(OPEN_SECTION)!.push({
+		id,
+		num: doc.nextId,
+		checked: false,
+		title,
+		partOf: fields.partOf ? normalizeId(fields.partOf, doc.pattern) : undefined,
+		blockedBy: (fields.blockedBy ?? [])
+			.map((b) => normalizeId(b, doc.pattern))
+			.filter((b) => b !== id),
+		status: fields.status,
+		assignee: fields.assignee,
+		labels: fields.labels ?? [],
+		uda: [],
+		detail
+	});
 	doc.nextId += 1;
 	return `Added ${id}: ${title}`;
 }
@@ -353,6 +378,10 @@ export function cmdDone(doc: Doc, idInput: string, target: SectionName = DONE_SE
 	const issue = move(doc, found, target);
 	issue.checked = CHECKED_SECTIONS.has(target);
 	issue.date = today();
+	// Close voids `status:` only (§5 decision 15): the workflow scalar is an
+	// open-only refinement (§2.2), so it clears on leaving the open section.
+	// @assignee, blocked-by:, part-of:, #label persist — they are facts, not state.
+	issue.status = undefined;
 	return `${issue.id} → ${target} (${issue.date})`;
 }
 
@@ -377,13 +406,235 @@ export function cmdNote(doc: Doc, idInput: string, text: string): string {
 	return `${issue.id} note added`;
 }
 
-export function cmdShow(doc: Doc, idInput: string): string {
+// ── Mutation verbs (§5.1 — the hybrid model) ─────────────────────────────────
+// Relational/many-valued fields get ergonomic verbs with a natural inverse
+// (validation + idempotent removal); flat scalars + UDAs go through `set`/`unset`.
+// Ids are stored normalized (canonical) on write, matching `add`'s field flags.
+
+/**
+ * `block <id> --by <blocker>` — add one blocker (§5 decision 3). Self-reference is
+ * the one hard **reject**; unknown-blocker / cycle are warn-but-write (surfaced by
+ * the caller via `graphWarnings`). Re-blocking an existing edge is an idempotent no-op.
+ */
+export function cmdBlock(doc: Doc, idInput: string, byInput: string): string {
+	const { issue } = requireIssue(doc, idInput);
+	const by = normalizeId(byInput, doc.pattern);
+	if (by === issue.id) throw new Error(`${issue.id}: cannot block on itself.`);
+	const cur = issue.blockedBy.map((b) => normalizeId(b, doc.pattern));
+	if (cur.includes(by)) return `${issue.id} already blocked-by ${by}`;
+	issue.blockedBy = [...cur, by];
+	return `${issue.id} blocked-by ${by}`;
+}
+
+/**
+ * `unblock <id> [--by <blocker>]` — remove one blocker, or (no `--by`) clear all
+ * (§5 decision 3). Removing an absent edge is an idempotent no-op + message (§5.3).
+ */
+export function cmdUnblock(doc: Doc, idInput: string, byInput?: string): string {
+	const { issue } = requireIssue(doc, idInput);
+	if (byInput === undefined) {
+		if (!issue.blockedBy.length) return `${issue.id} has no blockers`;
+		issue.blockedBy = [];
+		return `${issue.id} unblocked (all)`;
+	}
+	const by = normalizeId(byInput, doc.pattern);
+	const cur = issue.blockedBy.map((b) => normalizeId(b, doc.pattern));
+	if (!cur.includes(by)) return `${issue.id} was not blocked-by ${by}`;
+	issue.blockedBy = cur.filter((b) => b !== by);
+	return `${issue.id} no longer blocked-by ${by}`;
+}
+
+/** `assign <id> <who>` — the claim is an explicit string; no identity magic (§5 decision 4). */
+export function cmdAssign(doc: Doc, idInput: string, who: string): string {
+	const { issue } = requireIssue(doc, idInput);
+	issue.assignee = who;
+	return `${issue.id} assigned to @${who}`;
+}
+
+/** `unassign <id>` — clear the claim; absent is an idempotent no-op (§5.3). */
+export function cmdUnassign(doc: Doc, idInput: string): string {
+	const { issue } = requireIssue(doc, idInput);
+	if (!issue.assignee) return `${issue.id} was not assigned`;
+	const who = issue.assignee;
+	issue.assignee = undefined;
+	return `${issue.id} unassigned (@${who})`;
+}
+
+/** `label <id> <name[,name]>` — additive, deduped (§5 decision 5). */
+export function cmdLabel(doc: Doc, idInput: string, names: string[]): string {
+	const { issue } = requireIssue(doc, idInput);
+	const added: string[] = [];
+	for (const n of names) if (n && !issue.labels.includes(n)) added.push(n);
+	issue.labels.push(...added);
+	if (!added.length) return `${issue.id}: no new labels`;
+	return `${issue.id} labelled ${added.map((l) => '#' + l).join(' ')}`;
+}
+
+/** `unlabel <id> <name[,name]>` — targeted removal; absent names no-op (§5.3). */
+export function cmdUnlabel(doc: Doc, idInput: string, names: string[]): string {
+	const { issue } = requireIssue(doc, idInput);
+	const removed: string[] = [];
+	for (const n of names) {
+		const i = issue.labels.indexOf(n);
+		if (i !== -1) {
+			issue.labels.splice(i, 1);
+			removed.push(n);
+		}
+	}
+	if (!removed.length) return `${issue.id}: no matching labels`;
+	return `${issue.id} unlabelled ${removed.map((l) => '#' + l).join(' ')}`;
+}
+
+/**
+ * `set <id> <key>:<value>` — replace a flat scalar (`status`) or any UDA (§5 decision
+ * 6). Recognized relational keys route to their fields (a generic escape hatch); an
+ * unknown key upserts a verbatim UDA. Returns any write-time advisories: `set status:`
+ * on a closed issue, or a value outside a declared `statuses:` set — both warn-but-write
+ * (§5 decisions 7, 15 / §5.3).
+ */
+export function cmdSet(
+	doc: Doc,
+	idInput: string,
+	key: string,
+	value: string
+): { message: string; warnings: string[] } {
+	const { section, issue } = requireIssue(doc, idInput);
+	const warnings: string[] = [];
+	switch (key) {
+		case 'status': {
+			issue.status = value;
+			if (section !== OPEN_SECTION)
+				warnings.push(`${issue.id}: status set on a closed issue — open-only per §2.2`);
+			const declared = declaredStatuses(doc);
+			if (declared && !declared.has(value))
+				warnings.push(`${issue.id}: status:${value} is not in the declared statuses`);
+			break;
+		}
+		case 'part-of':
+			issue.partOf = normalizeId(value, doc.pattern);
+			break;
+		case 'assignee':
+			issue.assignee = value;
+			break;
+		case 'blocked-by':
+			issue.blockedBy = value
+				.split(',')
+				.map((v) => normalizeId(v.trim(), doc.pattern))
+				.filter((b) => b && b !== issue.id);
+			break;
+		case 'label':
+			issue.labels = value
+				.split(',')
+				.map((s) => s.trim())
+				.filter(Boolean);
+			break;
+		default: {
+			const existing = issue.uda.find((u) => u.key === key);
+			if (existing) existing.value = value;
+			else issue.uda.push({ key, value });
+		}
+	}
+	return { message: `${issue.id} set ${key}:${value}`, warnings };
+}
+
+/** `unset <id> <key>` — remove a scalar/UDA; absent is an idempotent no-op (§5.3). */
+export function cmdUnset(doc: Doc, idInput: string, key: string): string {
+	const { issue } = requireIssue(doc, idInput);
+	const noop = `${issue.id}: ${key} was not set`;
+	switch (key) {
+		case 'status':
+			if (!issue.status) return noop;
+			issue.status = undefined;
+			break;
+		case 'part-of':
+			if (!issue.partOf) return noop;
+			issue.partOf = undefined;
+			break;
+		case 'assignee':
+			if (!issue.assignee) return noop;
+			issue.assignee = undefined;
+			break;
+		case 'blocked-by':
+			if (!issue.blockedBy.length) return noop;
+			issue.blockedBy = [];
+			break;
+		case 'label':
+			if (!issue.labels.length) return noop;
+			issue.labels = [];
+			break;
+		default: {
+			const i = issue.uda.findIndex((u) => u.key === key);
+			if (i === -1) return noop;
+			issue.uda.splice(i, 1);
+		}
+	}
+	return `${issue.id} unset ${key}`;
+}
+
+// The project-declared workflow vocabulary, if the frontmatter carries a `statuses:`
+// key (§5 decision 7). Values are comma/whitespace separated; absent → no validation.
+function declaredStatuses(doc: Doc): Set<string> | null {
+	const entry = doc.frontmatter.find((e) => e.key === 'statuses');
+	if (!entry) return null;
+	const raw = entry.raw.replace(/^["']|["']$/g, '');
+	const vals = raw
+		.split(/[,\s]+/)
+		.map((s) => s.trim())
+		.filter(Boolean);
+	return vals.length ? new Set(vals) : null;
+}
+
+export interface ShowOptions {
+	children?: boolean;
+	quiet?: boolean; // -q: drop this issue's §3 advisories from the dossier (decision 8)
+}
+
+// The §3 advisories that name a given issue — the write-time / dossier subset of
+// `graphWarnings` (decision 8). The id is normalized so a raw or padded input matches.
+function warningsFor(doc: Doc, idInput: string): string[] {
+	const id = normalizeId(idInput, doc.pattern);
+	return graphWarnings(doc).filter((w) => w.includes(id));
+}
+
+/**
+ * `show <id>` — the full resolved dossier (§5 decision 17): status/assignee/labels,
+ * relationships expanded with their target's title + open/closed state, derived
+ * `⊘ blocked`, the note body, this issue's §3 warnings, and (with `--children`) its
+ * containment subtree. Its own render path — terminal output is never double-spaced.
+ */
+export function cmdShow(doc: Doc, idInput: string, opts: ShowOptions = {}): string {
 	const { section, issue } = requireIssue(doc, idInput);
 	const mark = issue.checked ? ' [x]' : '';
 	const date = issue.date ? ` (${issue.date})` : '';
-	const lines = [`${issue.id} — ${section}${mark}${date}`, issue.title];
+	const blk = isBlocked(doc, issue) ? ' ⊘ blocked' : '';
+	const lines = [`${issue.id} — ${section}${mark}${date}${blk}`, issue.title];
+	if (issue.status) lines.push(`  status: ${issue.status}`);
+	if (issue.assignee) lines.push(`  assignee: @${issue.assignee}`);
+	if (issue.labels.length) lines.push(`  labels: ${issue.labels.map((l) => '#' + l).join(' ')}`);
+	if (issue.partOf) lines.push(`  part-of: ${resolveRef(doc, issue.partOf)}`);
+	for (const b of issue.blockedBy) lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id)}`);
+	for (const u of issue.uda) lines.push(`  ${u.key}: ${u.value}`);
 	for (const d of issue.detail) lines.push(`    ${d}`);
+	if (opts.children) {
+		const kids = childrenOf(doc, issue.id);
+		if (kids.length) {
+			lines.push('  children:');
+			for (const k of kids) lines.push(...treeLines(doc, k, 2));
+		}
+	}
+	if (!opts.quiet) for (const w of warningsFor(doc, issue.id)) lines.push(`  ! ${w}`);
 	return lines.join('\n');
+}
+
+// Resolve a relationship pointer to a human-legible `id (title) — state` string, or
+// `id (not found)` when it dangles (§3.1/§3.2). `selfId` flags a self-reference edge.
+function resolveRef(doc: Doc, rawId: string, selfId?: string): string {
+	const id = normalizeId(rawId, doc.pattern);
+	if (selfId && id === selfId) return `${id} (self-reference — ignored)`;
+	const found = findIssue(doc, id);
+	if (!found) return `${id} (not found)`;
+	const state = found.section === OPEN_SECTION ? 'open' : found.section.toLowerCase();
+	return `${id} (${found.issue.title}) — ${state}`;
 }
 
 export interface ListOptions {
@@ -393,27 +644,67 @@ export interface ListOptions {
 	wontfix?: boolean;
 }
 
-export function cmdList(doc: Doc, opts: ListOptions = {}): string {
-	let names: SectionName[];
-	if (opts.all) names = [...SECTION_ORDER];
-	else {
-		const set = new Set<SectionName>();
-		if (opts.closed) [DONE_SECTION, DEFER_SECTION, WONTFIX_SECTION].forEach((s) => set.add(s));
-		if (opts.deferred) set.add(DEFER_SECTION);
-		if (opts.wontfix) set.add(WONTFIX_SECTION);
-		names = set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
-	}
+// The compact info-dense markers that ride an issue on the triage surface (§5
+// decision 17): `status:`, `@assignee`, `#labels`. A metadata-free issue adds none.
+function markers(issue: Issue): string {
+	let s = '';
+	if (issue.status) s += ` status:${issue.status}`;
+	if (issue.assignee) s += ` @${issue.assignee}`;
+	for (const l of issue.labels) s += ` #${l}`;
+	return s;
+}
 
+// One compact line for `list` (§5 decision 17): `⊘` when blocked, then the id, title,
+// the info-dense markers, an optional datestamp, and `…` when a note is attached.
+function listRow(doc: Doc, it: Issue): string {
+	const flag = isBlocked(doc, it) ? '⊘ ' : '';
+	const date = it.date ? ` (${it.date})` : '';
+	const more = it.detail.length ? ' …' : '';
+	return `  ${flag}${it.id}  ${it.title}${markers(it)}${date}${more}`;
+}
+
+// Does an issue pass the §4.4 status/label/parent filters? (AND across dimensions,
+// OR within a repeated one.) The block/claim gates are the frontier's job, not this —
+// shared by `frontier` and `list` so the vocabulary is one thing (§5 decision 18).
+function passesFilters(doc: Doc, it: Issue, filters: FrontierFilters): boolean {
+	if (filters.status?.length && (!it.status || !filters.status.includes(it.status))) return false;
+	if (filters.label?.length && !it.labels.some((l) => filters.label!.includes(l))) return false;
+	if (filters.parent?.length) {
+		const p = it.partOf ? normalizeId(it.partOf, doc.pattern) : undefined;
+		const want = filters.parent.map((x) => normalizeId(x, doc.pattern));
+		if (!p || !want.includes(p)) return false;
+	}
+	return true;
+}
+
+// On `list`, `--assignee` is a plain filter (open-work-owned-by narrowing is the
+// frontier's relaxer, §4.4); here it just matches the claim string.
+function listFilter(doc: Doc, it: Issue, filters: FrontierFilters): boolean {
+	if (!passesFilters(doc, it, filters)) return false;
+	if (filters.assignee?.length && (!it.assignee || !filters.assignee.includes(it.assignee)))
+		return false;
+	return true;
+}
+
+// Which sections `list` shows for a given flag set: `--all` → every section;
+// `--closed`/`--deferred`/`--wontfix` → the named closed buckets; default → open.
+function listSections(opts: ListOptions): SectionName[] {
+	if (opts.all) return [...SECTION_ORDER];
+	const set = new Set<SectionName>();
+	if (opts.closed) [DONE_SECTION, DEFER_SECTION, WONTFIX_SECTION].forEach((s) => set.add(s));
+	if (opts.deferred) set.add(DEFER_SECTION);
+	if (opts.wontfix) set.add(WONTFIX_SECTION);
+	return set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
+}
+
+export function cmdList(doc: Doc, opts: ListOptions = {}, filters: FrontierFilters = {}): string {
+	const names = listSections(opts);
 	const blocks: string[] = [];
 	for (const name of names) {
-		const issues = doc.sections.get(name) ?? [];
+		const issues = (doc.sections.get(name) ?? []).filter((it) => listFilter(doc, it, filters));
 		if (!issues.length) continue;
 		const header = names.length > 1 ? `${name}:` : '';
-		const rows = issues.map((it) => {
-			const date = it.date ? ` (${it.date})` : '';
-			const more = it.detail.length ? ' …' : '';
-			return `  ${it.id}  ${it.title}${date}${more}`;
-		});
+		const rows = issues.map((it) => listRow(doc, it));
 		blocks.push((header ? header + '\n' : '') + rows.join('\n'));
 	}
 	if (!blocks.length) return 'No issues.';
@@ -571,12 +862,6 @@ export interface FrontierFilters {
  */
 export function frontier(doc: Doc, filters: FrontierFilters = {}): Issue[] {
 	const wantAssignee = filters.assignee && filters.assignee.length ? filters.assignee : undefined;
-	const wantStatus = filters.status && filters.status.length ? filters.status : undefined;
-	const wantLabel = filters.label && filters.label.length ? filters.label : undefined;
-	const wantParent =
-		filters.parent && filters.parent.length
-			? filters.parent.map((p) => normalizeId(p, doc.pattern))
-			: undefined;
 
 	let items = (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => {
 		if (isBlocked(doc, it)) return false; // block gate always on (§4.4)
@@ -585,17 +870,20 @@ export function frontier(doc: Doc, filters: FrontierFilters = {}): Issue[] {
 		if (wantAssignee) {
 			if (!it.assignee || !wantAssignee.includes(it.assignee)) return false;
 		} else if (it.assignee) return false;
-		if (wantStatus && (!it.status || !wantStatus.includes(it.status))) return false;
-		if (wantLabel && !it.labels.some((l) => wantLabel.includes(l))) return false;
-		if (wantParent) {
-			const p = it.partOf ? normalizeId(it.partOf, doc.pattern) : undefined;
-			if (!p || !wantParent.includes(p)) return false;
-		}
-		return true;
+		return passesFilters(doc, it, filters); // shared status/label/parent narrowing
 	});
 
 	if (filters.limit !== undefined && filters.limit >= 0) items = items.slice(0, filters.limit);
 	return items;
+}
+
+/**
+ * Is `issue` (living in `section`) takeable — the base frontier predicate as a
+ * per-issue boolean for the `--json` contract (§6): open, unblocked, and unclaimed.
+ * Closed issues are never takeable.
+ */
+export function isTakeable(doc: Doc, issue: Issue, section: SectionName): boolean {
+	return section === OPEN_SECTION && !issue.assignee && !isBlocked(doc, issue);
 }
 
 function frontierRow(it: Issue): string {
@@ -661,13 +949,225 @@ function openBlockersOf(doc: Doc, blocked: Issue[]): string[] {
 	return waiting;
 }
 
+// ── Containment forest (`tree`, `show --children`) ───────────────────────────
+// Every issue across every section, in document order — the flat universe the
+// containment forest is built over.
+function allEntries(doc: Doc): { section: SectionName; issue: Issue }[] {
+	const out: { section: SectionName; issue: Issue }[] = [];
+	for (const name of SECTION_ORDER)
+		for (const it of doc.sections.get(name) ?? []) out.push({ section: name, issue: it });
+	return out;
+}
+
+// An issue's effective parent id: its `part-of:` normalized, but only if that parent
+// actually exists — a dangling `part-of:` renders the child top-level (§3.2).
+function validParentId(doc: Doc, issue: Issue): string | undefined {
+	if (!issue.partOf) return undefined;
+	const p = normalizeId(issue.partOf, doc.pattern);
+	return findIssue(doc, p) ? p : undefined;
+}
+
+// The direct children of `parentId` (§3.2 containment), in document order.
+function childrenOf(doc: Doc, parentId: string): Issue[] {
+	const pid = normalizeId(parentId, doc.pattern);
+	return allEntries(doc)
+		.filter((e) => validParentId(doc, e.issue) === pid)
+		.map((e) => e.issue);
+}
+
+// The containment-forest roots: every issue with no valid parent (top-level, or a
+// dangling `part-of:` that renders top-level — §3.2), in document order.
+function rootsOf(doc: Doc): Issue[] {
+	return allEntries(doc)
+		.filter((e) => !validParentId(doc, e.issue))
+		.map((e) => e.issue);
+}
+
+// One issue's forest lines: `⊘`-annotated when blocked (never drawn as structure —
+// §5 decision 13), tagged with its section when closed, then its subtree indented.
+// `seen` guards a pathological `part-of:` cycle from recursing forever.
+function treeLines(doc: Doc, issue: Issue, depth: number, seen = new Set<string>()): string[] {
+	const indent = '  '.repeat(depth + 1);
+	if (seen.has(issue.id)) return [`${indent}${issue.id} (part-of cycle)`];
+	seen.add(issue.id);
+	const flag = isBlocked(doc, issue) ? '⊘ ' : '';
+	const found = findIssue(doc, issue.id);
+	const tag = found && found.section !== OPEN_SECTION ? ` [${found.section}]` : '';
+	const out = [`${indent}${flag}${issue.id}  ${issue.title}${markers(issue)}${tag}`];
+	for (const k of childrenOf(doc, issue.id)) out.push(...treeLines(doc, k, depth + 1, seen));
+	return out;
+}
+
+/**
+ * `tree` — the containment-only forest (§5 decision 13), state-annotated. Roots are
+ * issues with no valid parent (top-level or dangling `part-of:`); children nest by
+ * `part-of:`. Blocking is a node annotation (`⊘`), never tree structure.
+ */
+export function cmdTree(doc: Doc): string {
+	const roots = rootsOf(doc);
+	if (!roots.length) return 'No issues.';
+	const seen = new Set<string>();
+	const lines: string[] = [];
+	for (const r of roots) lines.push(...treeLines(doc, r, 0, seen));
+	return lines.join('\n');
+}
+
+// ── doctor (read-only linter, §5 decision 19) ────────────────────────────────
+// Every anomaly the file carries, in one flat list: the §3 graph advisories, any
+// status outside a declared `statuses:` set, and structurally malformed lines.
+export function doctorFindings(doc: Doc, text: string): string[] {
+	const out = [...graphWarnings(doc)];
+	const declared = declaredStatuses(doc);
+	if (declared)
+		for (const { issue } of allEntries(doc))
+			if (issue.status && !declared.has(issue.status))
+				out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
+	out.push(...malformedLines(text));
+	return out;
+}
+
+// Lines inside a section that are neither an issue line, an indented note, nor blank —
+// content the parser would silently drop. Scanned off the raw text (the model has
+// already discarded them).
+function malformedLines(text: string): string[] {
+	const out: string[] = [];
+	let inSection = false;
+	for (const line of text.split('\n')) {
+		if (/^## /.test(line)) {
+			inSection = true;
+			continue;
+		}
+		if (!inSection || line.trim() === '') continue;
+		if (ISSUE_RE.test(line) || /^\s+/.test(line)) continue;
+		out.push(`malformed line (not an issue or note): ${line.trim()}`);
+	}
+	return out;
+}
+
+/** `doctor` — human-readable grouped findings; exit code is the caller's job (§5 decision 19). */
+export function cmdDoctor(doc: Doc, text: string): string {
+	const findings = doctorFindings(doc, text);
+	if (!findings.length) return 'No issues found — clean.';
+	const lines = [`${findings.length} finding${findings.length === 1 ? '' : 's'}:`];
+	for (const f of findings) lines.push(`  · ${f}`);
+	return lines.join('\n');
+}
+
+// ── `--json` read contract (§6) ──────────────────────────────────────────────
+// The per-issue shape every read emits: the stored fields plus the derived
+// `blocked`/`takeable` an agent would otherwise re-compute. Ids are normalized.
+function issueJson(doc: Doc, issue: Issue, section: SectionName) {
+	return {
+		id: issue.id,
+		title: issue.title,
+		section,
+		status: issue.status ?? null,
+		assignee: issue.assignee ?? null,
+		labels: issue.labels,
+		blockedBy: issue.blockedBy.map((b) => normalizeId(b, doc.pattern)),
+		partOf: issue.partOf ? normalizeId(issue.partOf, doc.pattern) : null,
+		blocked: isBlocked(doc, issue),
+		takeable: isTakeable(doc, issue, section)
+	};
+}
+
+export function cmdListJson(doc: Doc, opts: ListOptions = {}, filters: FrontierFilters = {}) {
+	const items: ReturnType<typeof issueJson>[] = [];
+	for (const name of listSections(opts))
+		for (const it of doc.sections.get(name) ?? [])
+			if (listFilter(doc, it, filters)) items.push(issueJson(doc, it, name));
+	return items;
+}
+
+// `ready --json` — the frontier list plus the §4.5 reason when it is empty (null otherwise).
+export function cmdReadyJson(doc: Doc, filters: FrontierFilters = {}) {
+	const items = frontier(doc, filters);
+	return {
+		issues: items.map((it) => issueJson(doc, it, OPEN_SECTION)),
+		reason: items.length ? null : diagnoseEmpty(doc, filters)
+	};
+}
+
+// `next --json` — the topmost takeable issue (or null) plus the same empty-reason.
+export function cmdNextJson(doc: Doc, filters: FrontierFilters = {}) {
+	const top = frontier(doc, { ...filters, limit: undefined })[0];
+	return {
+		issue: top ? issueJson(doc, top, OPEN_SECTION) : null,
+		reason: top ? null : diagnoseEmpty(doc, filters)
+	};
+}
+
+// A relationship pointer resolved for JSON: the target's title/section/openness, or a
+// `found: false` marker when it dangles.
+function refJson(doc: Doc, rawId: string) {
+	const id = normalizeId(rawId, doc.pattern);
+	const found = findIssue(doc, id);
+	return {
+		id,
+		title: found ? found.issue.title : null,
+		section: found ? found.section : null,
+		open: found ? found.section === OPEN_SECTION : false,
+		found: !!found
+	};
+}
+
+// The forest as JSON nodes — each issue's `--json` shape plus its nested children.
+function treeJson(doc: Doc, issues: Issue[], seen = new Set<string>()): unknown[] {
+	const out: unknown[] = [];
+	for (const it of issues) {
+		if (seen.has(it.id)) continue;
+		seen.add(it.id);
+		const found = findIssue(doc, it.id);
+		out.push({
+			...issueJson(doc, it, found ? found.section : OPEN_SECTION),
+			children: treeJson(doc, childrenOf(doc, it.id), seen)
+		});
+	}
+	return out;
+}
+
+export function cmdTreeJson(doc: Doc) {
+	return treeJson(doc, rootsOf(doc));
+}
+
+export function cmdShowJson(doc: Doc, idInput: string, opts: ShowOptions = {}) {
+	const { section, issue } = requireIssue(doc, idInput);
+	const base = issueJson(doc, issue, section);
+	const result: Record<string, unknown> = {
+		...base,
+		parent: issue.partOf ? refJson(doc, issue.partOf) : null,
+		blockers: issue.blockedBy.map((b) => refJson(doc, b)),
+		detail: issue.detail,
+		warnings: opts.quiet ? [] : warningsFor(doc, issue.id)
+	};
+	if (opts.children) result.children = treeJson(doc, childrenOf(doc, issue.id));
+	return result;
+}
+
+export function cmdDoctorJson(doc: Doc, text: string) {
+	const findings = doctorFindings(doc, text);
+	return { ok: findings.length === 0, findings };
+}
+
 // ── CLI dispatch ───────────────────────────────────────────────────────────
-// Flags that consume the next token as their value. The frontier filters plus
-// `--limit` join `--note` (§4.4 / §5.3 arg-parser extension).
-const VALUE_FLAGS = new Set(['note', 'status', 'label', 'parent', 'assignee', 'limit']);
+// Flags that consume the next token as their value. The frontier filters and
+// `--limit` (§4.4) plus the mutation-verb value flags `--by`/`--part-of`/
+// `--blocked-by` join `--note` (§5.3 arg-parser extension).
+const VALUE_FLAGS = new Set([
+	'note',
+	'status',
+	'label',
+	'parent',
+	'assignee',
+	'limit',
+	'by',
+	'part-of',
+	'blocked-by'
+]);
 // Value flags that may repeat — each occurrence accumulates into an array so a
-// dimension can OR within itself (`--label a --label b`; §4.4).
-const REPEATABLE_FLAGS = new Set(['status', 'label', 'parent', 'assignee']);
+// dimension can OR within itself (`--label a --label b`; §4.4). The comma-list
+// `add` flags accumulate the same way and are flattened at read time.
+const REPEATABLE_FLAGS = new Set(['status', 'label', 'parent', 'assignee', 'blocked-by']);
 
 type FlagValue = string | boolean | string[];
 
@@ -688,7 +1188,11 @@ function parseArgs(argv: string[]): {
 	};
 	for (let i = 0; i < argv.length; i++) {
 		const tok = argv[i] ?? '';
-		if (tok.startsWith('--')) {
+		// `-q` is the sole short flag — the quiet toggle (§5 decision 8), aliasing
+		// `--quiet`. Every other single-dash token falls through to a positional.
+		if (tok === '-q') {
+			flags.quiet = true;
+		} else if (tok.startsWith('--')) {
 			const body = tok.slice(2);
 			const eq = body.indexOf('=');
 			if (eq !== -1) setValue(body.slice(0, eq), body.slice(eq + 1));
@@ -701,11 +1205,29 @@ function parseArgs(argv: string[]): {
 	return { positionals, flags };
 }
 
-// Read the §4.4 filter set off the parsed flags. Repeatable dimensions arrive as
-// arrays; a lone occurrence is normalized up to a one-element array.
+// Normalize a flag value to a flat string list, splitting comma-lists so
+// `--label a,b` ORs the same as `--label a --label b` (§4.4). Blank fragments drop.
+function commaList(v: FlagValue | undefined): string[] {
+	if (v === undefined) return [];
+	const arr = Array.isArray(v) ? v : [String(v)];
+	return arr
+		.flatMap((s) => String(s).split(','))
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+// The first scalar value of a (possibly repeated) flag — for the single-valued
+// `add` field flags (`--part-of`, `--status`, `--assignee`).
+function firstStr(v: FlagValue | undefined): string | undefined {
+	const list = commaList(v);
+	return list.length ? list[0] : undefined;
+}
+
+// Read the §4.4 filter set off the parsed flags. Repeatable/comma dimensions arrive
+// as arrays; a lone occurrence is normalized up to a one-element array.
 function readFilters(flags: Record<string, FlagValue>): FrontierFilters {
 	const arr = (v: FlagValue | undefined): string[] | undefined =>
-		v === undefined ? undefined : Array.isArray(v) ? v : [String(v)];
+		v === undefined ? undefined : commaList(v);
 	const limit = typeof flags.limit === 'string' ? Number(flags.limit) : undefined;
 	return {
 		status: arr(flags.status),
@@ -718,16 +1240,27 @@ function readFilters(flags: Record<string, FlagValue>): FrontierFilters {
 
 const HELP = `Usage: issues <command> [args]
 
-  list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
-  next                                                the topmost takeable issue
-  ready                                               the whole takeable frontier
-  add "<title>" [--note "<text>"]                     add a new open issue
-  done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
-  reopen <id>                                         move an issue back to open
-  show <id>                                           print an issue with its note
-  edit <id> "<title>"                                 replace an issue's title
-  note <id> "<text>"                                  append a line to an issue's note
-  help                                               show this message`;
+Reads (add --json for the machine contract; -q silences advisories):
+  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  next   [filters]                                       the topmost takeable issue
+  ready  [filters] [--limit N]                           the whole takeable frontier
+  show <id> [--children]                                 full resolved dossier
+  tree                                                   containment forest (⊘ = blocked)
+  doctor                                                 lint the file (exit nonzero on findings)
+
+Mutations:
+  add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
+                [--status <s>] [--assignee <who>] [--label <name[,name]>]
+  block <id> --by <blocker>        unblock <id> [--by <blocker>]   (no --by clears all)
+  assign <id> <who>                unassign <id>
+  label <id> <name[,name]>         unlabel <id> <name[,name]>
+  set <id> <key>:<value>           unset <id> <key>
+  done <id> [--defer|--wontfix]    reopen <id>
+  edit <id> "<title>"              note <id> "<text>"
+  help                                                   show this message
+
+filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+         (AND across dimensions, OR within a repeated/comma-listed dimension)`;
 
 export interface RunResult {
 	text: string; // resulting file contents (unchanged unless `mutated`)
@@ -759,37 +1292,115 @@ export function run(text: string, argv: string[]): RunResult {
 		return v;
 	};
 
+	// Global read modifiers (§5 decision 8/9): `-q`/`--quiet` silences the advisory
+	// channel; `--json` swaps the human render for the §6 machine contract.
+	const quiet = !!flags.quiet;
+	const wantJson = !!flags.json;
+	const jsonOut = (d: unknown): string => JSON.stringify(d, null, 2);
+	// The §3 advisories a graph-reading command surfaces to stderr, gated by `-q`.
+	const advisories = (): string[] => (quiet ? [] : graphWarnings(doc));
+	// Write-time advisories for an edge-touching mutation (§5 decision 8): only the
+	// warnings that name the issue whose edge just changed.
+	const edgeAdvisories = (id: string): string[] => (quiet ? [] : warningsFor(doc, id));
+
 	switch (cmd) {
-		case 'list':
-			return result({
-				text,
-				mutated: false,
-				output: cmdList(doc, {
-					all: !!flags.all,
-					closed: !!flags.closed,
-					deferred: !!flags.deferred,
-					wontfix: !!flags.wontfix
-				})
-			});
-		case 'next':
-			return result({
-				text,
-				mutated: false,
-				output: cmdNext(doc, readFilters(flags)),
-				warnings: graphWarnings(doc)
-			});
-		case 'ready':
-			return result({
-				text,
-				mutated: false,
-				output: cmdReady(doc, readFilters(flags)),
-				warnings: graphWarnings(doc)
-			});
-		case 'show':
-			return result({ text, mutated: false, output: cmdShow(doc, need(1, 'id')) });
+		// ── Reads ────────────────────────────────────────────────────────────────
+		case 'list': {
+			const opts: ListOptions = {
+				all: !!flags.all,
+				closed: !!flags.closed,
+				deferred: !!flags.deferred,
+				wontfix: !!flags.wontfix
+			};
+			const filters = readFilters(flags);
+			const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters);
+			return result({ text, mutated: false, output, warnings: advisories() });
+		}
+		case 'next': {
+			const filters = readFilters(flags);
+			const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters);
+			return result({ text, mutated: false, output, warnings: advisories() });
+		}
+		case 'ready': {
+			const filters = readFilters(flags);
+			const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters);
+			return result({ text, mutated: false, output, warnings: advisories() });
+		}
+		case 'show': {
+			const id = need(1, 'id');
+			const opts: ShowOptions = { children: !!flags.children, quiet };
+			// `show` folds its issue's warnings into the dossier/JSON itself (§5 decision
+			// 17), so it does not also duplicate them on the stderr channel.
+			const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts);
+			return result({ text, mutated: false, output });
+		}
+		case 'tree': {
+			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc);
+			return result({ text, mutated: false, output, warnings: advisories() });
+		}
+		case 'doctor': {
+			// The one exit-code exception (§5 decision 19): findings are the actionable
+			// signal, so a non-empty report exits nonzero. Findings ride stdout, not stderr.
+			const findings = doctorFindings(doc, text);
+			const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text);
+			return result({ text, mutated: false, output, exitCode: findings.length ? 1 : 0 });
+		}
+
+		// ── Mutations ──────────────────────────────────────────────────────────────
 		case 'add': {
 			const note = typeof flags.note === 'string' ? flags.note : undefined;
-			const msg = cmdAdd(doc, need(1, 'title'), note);
+			const newId = formatId(doc.nextId, doc.pattern);
+			const msg = cmdAdd(doc, need(1, 'title'), note, {
+				partOf: firstStr(flags['part-of']),
+				blockedBy: commaList(flags['blocked-by']),
+				status: firstStr(flags.status),
+				assignee: firstStr(flags.assignee),
+				labels: commaList(flags.label)
+			});
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(newId) });
+		}
+		case 'block': {
+			const id = need(1, 'id');
+			const by = firstStr(flags.by);
+			if (!by) throw new Error('block: missing --by <blocker>');
+			const msg = cmdBlock(doc, id, by);
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(id) });
+		}
+		case 'unblock': {
+			const msg = cmdUnblock(doc, need(1, 'id'), firstStr(flags.by));
+			return result({ text: serialize(doc), output: msg, mutated: true });
+		}
+		case 'assign': {
+			const msg = cmdAssign(doc, need(1, 'id'), need(2, 'who'));
+			return result({ text: serialize(doc), output: msg, mutated: true });
+		}
+		case 'unassign': {
+			const msg = cmdUnassign(doc, need(1, 'id'));
+			return result({ text: serialize(doc), output: msg, mutated: true });
+		}
+		case 'label': {
+			const msg = cmdLabel(doc, need(1, 'id'), commaList(need(2, 'name')));
+			return result({ text: serialize(doc), output: msg, mutated: true });
+		}
+		case 'unlabel': {
+			const msg = cmdUnlabel(doc, need(1, 'id'), commaList(need(2, 'name')));
+			return result({ text: serialize(doc), output: msg, mutated: true });
+		}
+		case 'set': {
+			const id = need(1, 'id');
+			const kv = need(2, 'key:value');
+			const m = kv.match(/^([^:]+):([\s\S]*)$/);
+			if (!m) throw new Error(`set: expected <key>:<value>, got "${kv}"`);
+			const { message, warnings } = cmdSet(doc, id, m[1]!, m[2]!);
+			return result({
+				text: serialize(doc),
+				output: message,
+				mutated: true,
+				warnings: quiet ? [] : warnings
+			});
+		}
+		case 'unset': {
+			const msg = cmdUnset(doc, need(1, 'id'), need(2, 'key'));
 			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		case 'done': {
