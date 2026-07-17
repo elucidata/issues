@@ -55,3 +55,17 @@ Tabs, single quotes, no trailing commas — match the existing source.
   install `npm i -g github:elucidata/issues` → `issues <cmd>`.
 - Cross-agent skill (skills.sh): `npx skills add elucidata/issues` — the skill
   lives at `skills/issues/SKILL.md`. Update it when the CLI surface changes.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in the repo's GitHub Issues (`elucidata/issues`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles, each label named as its role (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context — one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
