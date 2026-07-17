@@ -15,6 +15,7 @@ var DETAIL_INDENT = "      ";
 var DEFAULT_PATTERN = "###";
 var ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
 var DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
+var BLOCKED_BY_SUFFIX_RE = /^(.*?)\s+blocked-by:([A-Za-z0-9]+(?:,[A-Za-z0-9]+)*)$/;
 function parse(text) {
   const lines = text.split(`
 `);
@@ -89,7 +90,13 @@ function toIssue(checked, id, rest, pattern) {
     title = dm[1] ?? rest;
     date = dm[2];
   }
-  return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, detail: [] };
+  let blockedBy = [];
+  const bm = title.match(BLOCKED_BY_SUFFIX_RE);
+  if (bm) {
+    title = bm[1] ?? title;
+    blockedBy = (bm[2] ?? "").split(",");
+  }
+  return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, blockedBy, detail: [] };
 }
 function trimBlankEdges(arr) {
   let start = 0;
@@ -130,6 +137,8 @@ function renderSection(name, issues) {
 function renderIssue(issue) {
   const box = issue.checked ? "x" : " ";
   let line = `- [${box}] ${issue.id}: ${issue.title}`;
+  if (issue.blockedBy.length)
+    line += ` blocked-by:${issue.blockedBy.join(",")}`;
   if (issue.date)
     line += ` (${issue.date})`;
   const detail = issue.detail.map((d) => DETAIL_INDENT + d);
@@ -188,7 +197,7 @@ function cmdAdd(doc, title, note) {
   const id = formatId(doc.nextId, doc.pattern);
   const detail = note ? note.split(`
 `).map((l) => l.trimStart()) : [];
-  doc.sections.get(OPEN_SECTION).push({ id, num: doc.nextId, checked: false, title, detail });
+  doc.sections.get(OPEN_SECTION).push({ id, num: doc.nextId, checked: false, title, blockedBy: [], detail });
   doc.nextId += 1;
   return `Added ${id}: ${title}`;
 }
@@ -267,6 +276,36 @@ function cmdList(doc, opts = {}) {
 
 `);
 }
+function openIdSet(doc) {
+  const ids = new Set;
+  for (const it of doc.sections.get(OPEN_SECTION) ?? [])
+    ids.add(it.id);
+  return ids;
+}
+function isBlocked(doc, issue) {
+  if (!issue.blockedBy.length)
+    return false;
+  const open = openIdSet(doc);
+  return issue.blockedBy.some((b) => open.has(normalizeId(b, doc.pattern)));
+}
+function frontier(doc) {
+  return (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => !isBlocked(doc, it));
+}
+function frontierRow(it) {
+  const more = it.detail.length ? " …" : "";
+  return `  ${it.id}  ${it.title}${more}`;
+}
+function cmdReady(doc) {
+  const items = frontier(doc);
+  if (!items.length)
+    return "No takeable issues.";
+  return items.map(frontierRow).join(`
+`);
+}
+function cmdNext(doc) {
+  const top = frontier(doc)[0];
+  return top ? frontierRow(top) : "No takeable issues.";
+}
 var VALUE_FLAGS = new Set(["note"]);
 function parseArgs(argv) {
   const positionals = [];
@@ -291,6 +330,8 @@ function parseArgs(argv) {
 var HELP = `Usage: issues <command> [args]
 
   list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
+  next                                                the topmost takeable issue
+  ready                                               the whole takeable frontier
   add "<title>" [--note "<text>"]                     add a new open issue
   done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
   reopen <id>                                         move an issue back to open
@@ -298,11 +339,14 @@ var HELP = `Usage: issues <command> [args]
   edit <id> "<title>"                                 replace an issue's title
   note <id> "<text>"                                  append a line to an issue's note
   help                                               show this message`;
+function result(fields) {
+  return { warnings: [], ...fields };
+}
 function run(text, argv) {
   const { positionals, flags } = parseArgs(argv);
   const cmd = positionals[0] ?? "help";
   if (cmd === "help" || cmd === "--help" || flags.help) {
-    return { text, output: HELP, mutated: false };
+    return result({ text, output: HELP, mutated: false });
   }
   const doc = parse(text);
   const arg = (n) => positionals[n];
@@ -314,7 +358,7 @@ function run(text, argv) {
   };
   switch (cmd) {
     case "list":
-      return {
+      return result({
         text,
         mutated: false,
         output: cmdList(doc, {
@@ -323,30 +367,34 @@ function run(text, argv) {
           deferred: !!flags.deferred,
           wontfix: !!flags.wontfix
         })
-      };
+      });
+    case "next":
+      return result({ text, mutated: false, output: cmdNext(doc) });
+    case "ready":
+      return result({ text, mutated: false, output: cmdReady(doc) });
     case "show":
-      return { text, mutated: false, output: cmdShow(doc, need(1, "id")) };
+      return result({ text, mutated: false, output: cmdShow(doc, need(1, "id")) });
     case "add": {
       const note = typeof flags.note === "string" ? flags.note : undefined;
       const msg = cmdAdd(doc, need(1, "title"), note);
-      return { text: serialize(doc), output: msg, mutated: true };
+      return result({ text: serialize(doc), output: msg, mutated: true });
     }
     case "done": {
       const target = flags.defer ? DEFER_SECTION : flags.wontfix ? WONTFIX_SECTION : DONE_SECTION;
       const msg = cmdDone(doc, need(1, "id"), target);
-      return { text: serialize(doc), output: msg, mutated: true };
+      return result({ text: serialize(doc), output: msg, mutated: true });
     }
     case "reopen": {
       const msg = cmdReopen(doc, need(1, "id"));
-      return { text: serialize(doc), output: msg, mutated: true };
+      return result({ text: serialize(doc), output: msg, mutated: true });
     }
     case "edit": {
       const msg = cmdEdit(doc, need(1, "id"), need(2, "title"));
-      return { text: serialize(doc), output: msg, mutated: true };
+      return result({ text: serialize(doc), output: msg, mutated: true });
     }
     case "note": {
       const msg = cmdNote(doc, need(1, "id"), need(2, "text"));
-      return { text: serialize(doc), output: msg, mutated: true };
+      return result({ text: serialize(doc), output: msg, mutated: true });
     }
     default:
       throw new Error(`Unknown command: ${cmd}
@@ -381,12 +429,17 @@ function main(argv) {
     text = "";
   }
   try {
-    const result = run(text, argv);
-    if (result.mutated)
-      writeFileSync(filePath, result.text);
-    if (result.output)
-      process.stdout.write(result.output + `
+    const result2 = run(text, argv);
+    if (result2.mutated)
+      writeFileSync(filePath, result2.text);
+    if (result2.output)
+      process.stdout.write(result2.output + `
 `);
+    for (const w of result2.warnings)
+      process.stderr.write(w + `
+`);
+    if (result2.exitCode)
+      process.exit(result2.exitCode);
   } catch (err) {
     process.stderr.write((err instanceof Error ? err.message : String(err)) + `
 `);

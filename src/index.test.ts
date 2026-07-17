@@ -12,6 +12,10 @@ import {
 	cmdNote,
 	cmdShow,
 	cmdList,
+	isBlocked,
+	frontier,
+	cmdNext,
+	cmdReady,
 	run
 } from './index';
 
@@ -310,5 +314,117 @@ describe('run (pure CLI dispatch)', () => {
 
 	it('missing required argument throws', () => {
 		expect(() => run(SAMPLE, ['done'])).toThrow(/missing <id>/);
+	});
+
+	it('every result carries a warnings array (seam extension)', () => {
+		expect(run(SAMPLE, ['list']).warnings).toEqual([]);
+		expect(run(SAMPLE, ['add', 'x']).warnings).toEqual([]);
+	});
+});
+
+// ── T1 — Tracer: blocked-by: one field, end-to-end (spec #11 Stage 1) ────────
+// A self-contained fixture in canonical (blank-separated) form carrying the one
+// field this tracer drives the whole way through the pipeline.
+const BLOCKED = `---
+next_id: 10
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Root task.
+
+- [ ] 002: Blocked by an open one. blocked-by:001
+
+- [ ] 003: Blocked by a closed one. blocked-by:006
+
+- [ ] 004: Blocked by two, one open. blocked-by:001,006
+
+## Completed
+
+- [x] 006: Done already. (2026-06-07)
+
+## Deferred
+
+## Won't Fix
+`;
+
+describe('blocked-by: parse & serialize (tail field)', () => {
+	it('peels a trailing blocked-by: field off the issue line into the model', () => {
+		const issues = parse(BLOCKED).sections.get('Issues')!;
+		expect(issues.map((i) => i.title)).toEqual([
+			'Root task.',
+			'Blocked by an open one.',
+			'Blocked by a closed one.',
+			'Blocked by two, one open.'
+		]);
+		expect(issues[0]!.blockedBy).toEqual([]);
+		expect(issues[1]!.blockedBy).toEqual(['001']);
+		expect(issues[3]!.blockedBy).toEqual(['001', '006']);
+	});
+
+	it('leaves a metadata-free line untouched (SAMPLE still round-trips)', () => {
+		expect(serialize(parse(SAMPLE))).toBe(SAMPLE);
+	});
+
+	it('round-trips a blocked-by:-bearing tail verbatim (fixed point)', () => {
+		expect(serialize(parse(BLOCKED))).toBe(BLOCKED);
+	});
+});
+
+describe('blocked derivation (read-time, nothing stored)', () => {
+	it('is blocked only when a listed blocker still sits in the open Issues section', () => {
+		const doc = parse(BLOCKED);
+		const by = (id: string) => findIssue(doc, id)!.issue;
+		expect(isBlocked(doc, by('001'))).toBe(false); // no blockers
+		expect(isBlocked(doc, by('002'))).toBe(true); // 001 open
+		expect(isBlocked(doc, by('003'))).toBe(false); // 006 closed satisfies the gate
+		expect(isBlocked(doc, by('004'))).toBe(true); // 001 open → still blocked (direct-only)
+	});
+
+	it('a dangling blocker fails open (does not block)', () => {
+		const doc = parse(BLOCKED);
+		const dangler = { ...findIssue(doc, '001')!.issue, blockedBy: ['999'] };
+		expect(isBlocked(doc, dangler)).toBe(false);
+	});
+
+	it('reopening a blocker re-derives the block for free', () => {
+		const doc = parse(BLOCKED);
+		expect(isBlocked(doc, findIssue(doc, '003')!.issue)).toBe(false);
+		cmdReopen(doc, '006'); // 006 → Issues (open)
+		expect(isBlocked(doc, findIssue(doc, '003')!.issue)).toBe(true);
+	});
+
+	it('frontier is open ∩ every blocker closed, in document order', () => {
+		expect(frontier(parse(BLOCKED)).map((i) => i.id)).toEqual(['001', '003']);
+	});
+});
+
+describe('next / ready through the run seam', () => {
+	it('ready lists the whole unblocked frontier in document order', () => {
+		const out = cmdReady(parse(BLOCKED));
+		expect(out).toContain('001');
+		expect(out).toContain('003');
+		expect(out).not.toContain('002');
+		expect(out).not.toContain('004');
+	});
+
+	it('next is ready[0] — the topmost takeable issue', () => {
+		expect(cmdNext(parse(BLOCKED))).toContain('001');
+	});
+
+	it('neither next nor ready mutates', () => {
+		expect(run(BLOCKED, ['next']).mutated).toBe(false);
+		expect(run(BLOCKED, ['ready']).mutated).toBe(false);
+		expect(run(BLOCKED, ['ready']).text).toBe(BLOCKED);
+	});
+
+	it('reports a normal empty frontier when nothing is takeable', () => {
+		const doc = `---\nnext_id: 3\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A. blocked-by:002\n\n- [ ] 002: B. blocked-by:001\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const r = run(doc, ['next']);
+		expect(r.mutated).toBe(false);
+		expect(r.exitCode ?? 0).toBe(0);
+		expect(r.output).toMatch(/no takeable/i);
 	});
 });

@@ -27,6 +27,7 @@ export interface Issue {
     checked: boolean;
     title: string;
     date?: string;
+    blockedBy: string[];
     detail: string[];
 }
 interface FrontmatterEntry {
@@ -63,10 +64,29 @@ export interface ListOptions {
     wontfix?: boolean;
 }
 export declare function cmdList(doc: Doc, opts?: ListOptions): string;
+/**
+ * Is `issue` blocked? True iff any of its `blocked-by:` ids still sits in the
+ * open `Issues` section — direct-only, non-transitive (§3.1). A dangling id
+ * (found nowhere) is not open, so it fails open and does not block. Purely
+ * derived; nothing is written back.
+ */
+export declare function isBlocked(doc: Doc, issue: Issue): boolean;
+/**
+ * The takeable frontier: open issues whose every blocker is closed, in document
+ * order (§4.1). The claim gate and filters arrive in a later stage (T3); this
+ * first cut is open ∩ unblocked.
+ */
+export declare function frontier(doc: Doc): Issue[];
+/** `ready` — the whole ordered takeable frontier (§4.2). Read-only. */
+export declare function cmdReady(doc: Doc): string;
+/** `next` — the topmost takeable issue (`ready[0]`), or a normal empty state. */
+export declare function cmdNext(doc: Doc): string;
 export interface RunResult {
     text: string;
     output: string;
     mutated: boolean;
+    warnings: string[];
+    exitCode?: number;
 }
 /** Pure command runner — no filesystem access, for testing and reuse. */
 export declare function run(text: string, argv: string[]): RunResult;

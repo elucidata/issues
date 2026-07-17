@@ -50,6 +50,10 @@ function main(argv: string[]): void {
 		const result = run(text, argv);
 		if (result.mutated) writeFileSync(filePath, result.text);
 		if (result.output) process.stdout.write(result.output + '\n');
+		// Advisory §3 warnings ride their own channel — stderr, never mixed into
+		// stdout/JSON — and never block a write. `-q`/`--quiet` gating arrives later.
+		for (const w of result.warnings) process.stderr.write(w + '\n');
+		if (result.exitCode) process.exit(result.exitCode);
 	} catch (err) {
 		process.stderr.write((err instanceof Error ? err.message : String(err)) + '\n');
 		process.exit(1);

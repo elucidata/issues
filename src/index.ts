@@ -44,6 +44,7 @@ export interface Issue {
 	checked: boolean;
 	title: string;
 	date?: string; // ISO YYYY-MM-DD datestamp when closed/deferred
+	blockedBy: string[]; // `blocked-by:` id pointers, verbatim (read-only; §1.2)
 	detail: string[]; // note lines, stored without indentation
 }
 
@@ -64,6 +65,10 @@ export interface Doc {
 // bare `007`), so a numeric-only `pattern` round-trips alongside prefixed ones.
 const ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
 const DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
+// A trailing `blocked-by:<id[,id]>` field peels off the tail of the issue line
+// (§1.2). T1 recognizes this one field; the rest of the tail vocabulary arrives
+// in T2. Value is comma-separated ids, stored verbatim so it round-trips.
+const BLOCKED_BY_SUFFIX_RE = /^(.*?)\s+blocked-by:([A-Za-z0-9]+(?:,[A-Za-z0-9]+)*)$/;
 
 // ── Parse ────────────────────────────────────────────────────────────────
 export function parse(text: string): Doc {
@@ -141,7 +146,15 @@ function toIssue(checked: boolean, id: string, rest: string, pattern: string): I
 		title = dm[1] ?? rest;
 		date = dm[2];
 	}
-	return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, detail: [] };
+	// Peel the `blocked-by:` field off the tail (before the date suffix). Ids are
+	// kept verbatim — they are read-only pointers, normalized only at comparison.
+	let blockedBy: string[] = [];
+	const bm = title.match(BLOCKED_BY_SUFFIX_RE);
+	if (bm) {
+		title = bm[1] ?? title;
+		blockedBy = (bm[2] ?? '').split(',');
+	}
+	return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, blockedBy, detail: [] };
 }
 
 function trimBlankEdges(arr: string[]): string[] {
@@ -177,6 +190,9 @@ function renderSection(name: SectionName, issues: Issue[]): string {
 function renderIssue(issue: Issue): string {
 	const box = issue.checked ? 'x' : ' ';
 	let line = `- [${box}] ${issue.id}: ${issue.title}`;
+	// Tail fields re-emit after the title, before the date suffix (§1.2). T1: only
+	// `blocked-by:`. An empty list writes nothing, so metadata-free lines are untouched.
+	if (issue.blockedBy.length) line += ` blocked-by:${issue.blockedBy.join(',')}`;
 	if (issue.date) line += ` (${issue.date})`;
 	const detail = issue.detail.map((d) => DETAIL_INDENT + d);
 	return [line, ...detail].join('\n');
@@ -246,7 +262,9 @@ export function today(): string {
 export function cmdAdd(doc: Doc, title: string, note?: string): string {
 	const id = formatId(doc.nextId, doc.pattern);
 	const detail = note ? note.split('\n').map((l) => l.trimStart()) : [];
-	doc.sections.get(OPEN_SECTION)!.push({ id, num: doc.nextId, checked: false, title, detail });
+	doc.sections
+		.get(OPEN_SECTION)!
+		.push({ id, num: doc.nextId, checked: false, title, blockedBy: [], detail });
 	doc.nextId += 1;
 	return `Added ${id}: ${title}`;
 }
@@ -324,6 +342,55 @@ export function cmdList(doc: Doc, opts: ListOptions = {}): string {
 	return blocks.join('\n\n');
 }
 
+// ── Graph derivation (read-time, nothing stored) ─────────────────────────────
+// The set of ids currently sitting in the open `Issues` section. A blocker
+// counts as "resolved" the moment it leaves this set — any closed section
+// (Completed/Deferred/Won't Fix) satisfies the gate (§3.1).
+function openIdSet(doc: Doc): Set<string> {
+	const ids = new Set<string>();
+	for (const it of doc.sections.get(OPEN_SECTION) ?? []) ids.add(it.id);
+	return ids;
+}
+
+/**
+ * Is `issue` blocked? True iff any of its `blocked-by:` ids still sits in the
+ * open `Issues` section — direct-only, non-transitive (§3.1). A dangling id
+ * (found nowhere) is not open, so it fails open and does not block. Purely
+ * derived; nothing is written back.
+ */
+export function isBlocked(doc: Doc, issue: Issue): boolean {
+	if (!issue.blockedBy.length) return false;
+	const open = openIdSet(doc);
+	return issue.blockedBy.some((b) => open.has(normalizeId(b, doc.pattern)));
+}
+
+/**
+ * The takeable frontier: open issues whose every blocker is closed, in document
+ * order (§4.1). The claim gate and filters arrive in a later stage (T3); this
+ * first cut is open ∩ unblocked.
+ */
+export function frontier(doc: Doc): Issue[] {
+	return (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => !isBlocked(doc, it));
+}
+
+function frontierRow(it: Issue): string {
+	const more = it.detail.length ? ' …' : '';
+	return `  ${it.id}  ${it.title}${more}`;
+}
+
+/** `ready` — the whole ordered takeable frontier (§4.2). Read-only. */
+export function cmdReady(doc: Doc): string {
+	const items = frontier(doc);
+	if (!items.length) return 'No takeable issues.';
+	return items.map(frontierRow).join('\n');
+}
+
+/** `next` — the topmost takeable issue (`ready[0]`), or a normal empty state. */
+export function cmdNext(doc: Doc): string {
+	const top = frontier(doc)[0];
+	return top ? frontierRow(top) : 'No takeable issues.';
+}
+
 // ── CLI dispatch ───────────────────────────────────────────────────────────
 const VALUE_FLAGS = new Set(['note']);
 
@@ -351,6 +418,8 @@ function parseArgs(argv: string[]): {
 const HELP = `Usage: issues <command> [args]
 
   list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
+  next                                                the topmost takeable issue
+  ready                                               the whole takeable frontier
   add "<title>" [--note "<text>"]                     add a new open issue
   done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
   reopen <id>                                         move an issue back to open
@@ -363,6 +432,14 @@ export interface RunResult {
 	text: string; // resulting file contents (unchanged unless `mutated`)
 	output: string; // text to print to stdout
 	mutated: boolean; // whether the file should be written back
+	warnings: string[]; // advisory §3 messages — bin.ts prints to stderr, never mixed into `output`
+	exitCode?: number; // defaults to 0; `doctor` sets 1 on findings (the sole exception)
+}
+
+// Fill the advisory defaults so each dispatch arm names only what it produces —
+// most commands emit no warnings. Later stages pass `warnings`/`exitCode` explicitly.
+function result(fields: Omit<RunResult, 'warnings'> & { warnings?: string[] }): RunResult {
+	return { warnings: [], ...fields };
 }
 
 /** Pure command runner — no filesystem access, for testing and reuse. */
@@ -370,7 +447,7 @@ export function run(text: string, argv: string[]): RunResult {
 	const { positionals, flags } = parseArgs(argv);
 	const cmd = positionals[0] ?? 'help';
 	if (cmd === 'help' || cmd === '--help' || flags.help) {
-		return { text, output: HELP, mutated: false };
+		return result({ text, output: HELP, mutated: false });
 	}
 
 	const doc = parse(text);
@@ -383,7 +460,7 @@ export function run(text: string, argv: string[]): RunResult {
 
 	switch (cmd) {
 		case 'list':
-			return {
+			return result({
 				text,
 				mutated: false,
 				output: cmdList(doc, {
@@ -392,30 +469,34 @@ export function run(text: string, argv: string[]): RunResult {
 					deferred: !!flags.deferred,
 					wontfix: !!flags.wontfix
 				})
-			};
+			});
+		case 'next':
+			return result({ text, mutated: false, output: cmdNext(doc) });
+		case 'ready':
+			return result({ text, mutated: false, output: cmdReady(doc) });
 		case 'show':
-			return { text, mutated: false, output: cmdShow(doc, need(1, 'id')) };
+			return result({ text, mutated: false, output: cmdShow(doc, need(1, 'id')) });
 		case 'add': {
 			const note = typeof flags.note === 'string' ? flags.note : undefined;
 			const msg = cmdAdd(doc, need(1, 'title'), note);
-			return { text: serialize(doc), output: msg, mutated: true };
+			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		case 'done': {
 			const target = flags.defer ? DEFER_SECTION : flags.wontfix ? WONTFIX_SECTION : DONE_SECTION;
 			const msg = cmdDone(doc, need(1, 'id'), target);
-			return { text: serialize(doc), output: msg, mutated: true };
+			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		case 'reopen': {
 			const msg = cmdReopen(doc, need(1, 'id'));
-			return { text: serialize(doc), output: msg, mutated: true };
+			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		case 'edit': {
 			const msg = cmdEdit(doc, need(1, 'id'), need(2, 'title'));
-			return { text: serialize(doc), output: msg, mutated: true };
+			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		case 'note': {
 			const msg = cmdNote(doc, need(1, 'id'), need(2, 'text'));
-			return { text: serialize(doc), output: msg, mutated: true };
+			return result({ text: serialize(doc), output: msg, mutated: true });
 		}
 		default:
 			throw new Error(`Unknown command: ${cmd}\n\n${HELP}`);
