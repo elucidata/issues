@@ -75,7 +75,12 @@ How it's read:
   Completed`, `## Deferred`, `## Won't Fix`. `Completed` items render checked
   (`[x]`); the rest stay `[ ]`.
 - **Issue line:** `- [ ] <id>: <title>`, with an optional ` (YYYY-MM-DD)`
-  datestamp appended when an issue is closed/deferred.
+  datestamp appended when an issue is closed/deferred. Optional inline metadata
+  rides the **tail** of the line and is peeled off on read: `blocked-by:<id[,id]>`
+  and `part-of:<id>` (relationships), `status:<value>` (workflow), `@assignee`
+  (claim), `#label` (category), plus any custom `key:value` (a user-defined
+  attribute, preserved verbatim). A line with no tail metadata is left
+  byte-identical, so a metadata-free file in canonical form round-trips unchanged.
 - **Notes:** indented continuation lines beneath an issue.
 
 You never have to write this by hand — but you can, and the CLI will keep it tidy.
@@ -85,15 +90,35 @@ You never have to write this by hand — but you can, and the CLI will keep it t
 ```
 issues <command> [args]
 
-  list [--all] [--closed] [--deferred] [--wontfix]   list issues (default: open)
-  add "<title>" [--note "<text>"]                     add a new open issue
-  done <id> [--defer] [--wontfix]                     close / defer / wontfix an issue
-  reopen <id>                                         move an issue back to open
-  show <id>                                           print an issue with its note
-  edit <id> "<title>"                                 replace an issue's title
-  note <id> "<text>"                                  append a line to an issue's note
-  help                                               show this message
+Reads (add --json for the machine contract; -q silences advisories):
+  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  next   [filters]                                       the topmost takeable issue
+  ready  [filters] [--limit N]                           the whole takeable frontier
+  show <id> [--children]                                 full resolved dossier
+  tree                                                   containment forest (⊘ = blocked)
+  doctor                                                 lint the file (exit nonzero on findings)
+
+Mutations:
+  add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
+                [--status <s>] [--assignee <who>] [--label <name[,name]>]
+  block <id> --by <blocker>        unblock <id> [--by <blocker>]   (no --by clears all)
+  assign <id> <who>                unassign <id>
+  label <id> <name[,name]>         unlabel <id> <name[,name]>
+  set <id> <key>:<value>           unset <id> <key>
+  done <id> [--defer|--wontfix]    reopen <id>
+  edit <id> "<title>"              note <id> "<text>"
+  help                                                   show this message
+
+filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+         (AND across dimensions, OR within a repeated/comma-listed dimension)
 ```
+
+`next`/`ready` are the **takeable frontier** — open ∩ every blocker closed ∩
+unclaimed, in document order — the one query an agent runs to pick up work;
+filters only narrow it. Every read speaks `--json` (see the skill for the exact
+contract); graph state (`blocked`, `takeable`) is **derived at read time, never
+stored**. Warnings are advisory — stderr, exit 0, silenced with `-q`; `doctor` is
+the exception and exits nonzero on findings, so it's CI-gateable.
 
 IDs are forgiving on input — `1`, `001`, `m1`, and `M001` all resolve to the
 same canonical id under an `M##`/`###` pattern.

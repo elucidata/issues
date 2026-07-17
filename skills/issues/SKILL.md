@@ -31,7 +31,7 @@ If no `ISSUES.md` is found, run `issues add` which will create the file automati
 ```
 issues <command> [args]
 
-Reads (add --json for a machine contract; -q silences advisories):
+Reads (add --json for the machine contract; -q silences advisories):
   list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
@@ -48,7 +48,7 @@ Mutations:
   set <id> <key>:<value>           unset <id> <key>
   done <id> [--defer|--wontfix]    reopen <id>
   edit <id> "<title>"              note <id> "<text>"
-  help                                                   show usage
+  help                                                   show this message
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
@@ -74,6 +74,31 @@ Beyond open/closed sections, issues carry inline metadata on the tail of the lin
 `next`/`ready` are always the **takeable frontier** (open ∩ unblocked ∩ unclaimed);
 filters only narrow it. Warnings are advisory — stderr, exit 0, silenceable with `-q`.
 `doctor` is the exception: it exits nonzero when it finds anything, so it is CI-gateable.
+
+## The `--json` contract
+
+Every read (`list`/`next`/`ready`/`show`/`tree`) takes `--json` and emits the machine
+contract; human text is the default. Read emptiness **structurally** (`null`/`[]`), never
+from the exit code — an empty frontier is a normal exit 0.
+
+Each issue is an object:
+
+```json
+{ "id": "003", "title": "Docs", "section": "Issues",
+  "status": null, "assignee": null, "labels": ["docs"],
+  "blockedBy": [], "partOf": "002", "blocked": false, "takeable": true }
+```
+
+- `list` / `tree` → an **array** of these (`tree` nests each child under `"children": [...]`).
+- `next` → `{ "issue": <obj>|null, "reason": <string>|null }`.
+- `ready` → `{ "issues": [<obj>], "reason": <string>|null }`.
+- `show` → the object plus `parent`, `blockers` (each `{id,title,section,open,found}`),
+  `detail` (note lines), and `warnings`.
+
+`blocked` and `takeable` are **derived at read time, never stored**. On `next`/`ready`,
+`reason` is `null` when the frontier is non-empty and otherwise diagnoses the empty state
+(drained / all blocked / all claimed / no filter match) so an agent loop can decide
+stop-vs-wait without treating empty as an error.
 
 ## Examples
 
