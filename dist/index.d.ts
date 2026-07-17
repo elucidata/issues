@@ -81,15 +81,36 @@ export declare function cmdList(doc: Doc, opts?: ListOptions): string;
  */
 export declare function isBlocked(doc: Doc, issue: Issue): boolean;
 /**
- * The takeable frontier: open issues whose every blocker is closed, in document
- * order (§4.1). The claim gate and filters arrive in a later stage (T3); this
- * first cut is open ∩ unblocked.
+ * The §3 advisory warnings, derived read-time as the graph is walked over the open
+ * `Issues` section. Every anomaly fails open (§3.4 / §4.6) — these change nothing
+ * about frontier membership, they only inform. Five kinds:
+ *   · self-reference     — `A blocked-by A`: edge ignored (§3.1)
+ *   · dangling blocker   — id found nowhere: fails open (§3.1)
+ *   · won't-fix blocker  — gate satisfied by a rejected issue (§3.1, advisory)
+ *   · dangling part-of   — parent found nowhere: child renders top-level (§3.2)
+ *   · cycle              — mutual deadlock: members stay blocked, never broken (§3.1)
+ * Exported for focused unit tests and reused by the read commands.
  */
-export declare function frontier(doc: Doc): Issue[];
-/** `ready` — the whole ordered takeable frontier (§4.2). Read-only. */
-export declare function cmdReady(doc: Doc): string;
-/** `next` — the topmost takeable issue (`ready[0]`), or a normal empty state. */
-export declare function cmdNext(doc: Doc): string;
+export declare function graphWarnings(doc: Doc): string[];
+export interface FrontierFilters {
+    status?: string[];
+    label?: string[];
+    parent?: string[];
+    assignee?: string[];
+    limit?: number;
+}
+/**
+ * The takeable frontier (§4.1): open issues whose every blocker is closed and which
+ * are **unclaimed**, in document order — then narrowed by the §4.4 filters. The
+ * block gate is always on (§4.4); `status:` never gates (§4.3), it is only a filter.
+ * `--assignee <who>` relaxes the unclaimed gate and instead requires `assignee == who`.
+ * Pure; nothing stored.
+ */
+export declare function frontier(doc: Doc, filters?: FrontierFilters): Issue[];
+/** `ready` — the whole ordered takeable frontier (§4.2); empty is diagnosed (§4.5). */
+export declare function cmdReady(doc: Doc, filters?: FrontierFilters): string;
+/** `next` — the topmost takeable issue (`ready[0]`), or the same empty-diagnosis. */
+export declare function cmdNext(doc: Doc, filters?: FrontierFilters): string;
 export interface RunResult {
     text: string;
     output: string;

@@ -336,48 +336,203 @@ function cmdList(doc, opts = {}) {
 `);
 }
 function openIdSet(doc) {
+  return idSet(doc, OPEN_SECTION);
+}
+function idSet(doc, section) {
   const ids = new Set;
-  for (const it of doc.sections.get(OPEN_SECTION) ?? [])
+  for (const it of doc.sections.get(section) ?? [])
     ids.add(it.id);
   return ids;
+}
+function allIdSet(doc) {
+  const ids = new Set;
+  for (const name of SECTION_ORDER)
+    for (const it of doc.sections.get(name) ?? [])
+      ids.add(it.id);
+  return ids;
+}
+function blockerIds(doc, issue) {
+  return issue.blockedBy.map((b) => normalizeId(b, doc.pattern)).filter((b) => b !== issue.id);
 }
 function isBlocked(doc, issue) {
   if (!issue.blockedBy.length)
     return false;
   const open = openIdSet(doc);
-  return issue.blockedBy.some((b) => open.has(normalizeId(b, doc.pattern)));
+  return blockerIds(doc, issue).some((b) => open.has(b));
 }
-function frontier(doc) {
-  return (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => !isBlocked(doc, it));
+function graphWarnings(doc) {
+  const warnings = [];
+  const all = allIdSet(doc);
+  const wontfix = idSet(doc, WONTFIX_SECTION);
+  for (const it of doc.sections.get(OPEN_SECTION) ?? []) {
+    for (const raw of it.blockedBy) {
+      const b = normalizeId(raw, doc.pattern);
+      if (b === it.id) {
+        warnings.push(`${it.id}: blocked-by ${b} is a self-reference — edge ignored`);
+      } else if (!all.has(b)) {
+        warnings.push(`${it.id}: blocked-by ${b} not found — fails open (does not block)`);
+      } else if (wontfix.has(b)) {
+        warnings.push(`${it.id}: blocker ${b} is won't-fix — gate satisfied by a rejected issue`);
+      }
+    }
+    if (it.partOf) {
+      const p = normalizeId(it.partOf, doc.pattern);
+      if (!all.has(p)) {
+        warnings.push(`${it.id}: part-of ${p} not found — rendered top-level`);
+      }
+    }
+  }
+  for (const cycle of detectCycles(doc)) {
+    warnings.push(`blocked-by cycle: ${cycle.join(" → ")} → ${cycle[0]} — members stay blocked`);
+  }
+  return warnings;
+}
+function detectCycles(doc) {
+  const openIds = openIdSet(doc);
+  const adj = new Map;
+  for (const it of doc.sections.get(OPEN_SECTION) ?? []) {
+    adj.set(it.id, blockerIds(doc, it).filter((b) => openIds.has(b)));
+  }
+  const WHITE = 0;
+  const GRAY = 1;
+  const BLACK = 2;
+  const color = new Map;
+  for (const id of adj.keys())
+    color.set(id, WHITE);
+  const stack = [];
+  const cycles = [];
+  const seen = new Set;
+  const visit = (u) => {
+    color.set(u, GRAY);
+    stack.push(u);
+    for (const v of adj.get(u) ?? []) {
+      if (color.get(v) === GRAY) {
+        const cycle = rotateToMin(stack.slice(stack.indexOf(v)));
+        const key = cycle.join(",");
+        if (!seen.has(key)) {
+          seen.add(key);
+          cycles.push(cycle);
+        }
+      } else if (color.get(v) === WHITE) {
+        visit(v);
+      }
+    }
+    stack.pop();
+    color.set(u, BLACK);
+  };
+  for (const id of adj.keys())
+    if (color.get(id) === WHITE)
+      visit(id);
+  return cycles;
+}
+function rotateToMin(cycle) {
+  let min = 0;
+  for (let i = 1;i < cycle.length; i++)
+    if ((cycle[i] ?? "") < (cycle[min] ?? ""))
+      min = i;
+  return [...cycle.slice(min), ...cycle.slice(0, min)];
+}
+function frontier(doc, filters = {}) {
+  const wantAssignee = filters.assignee && filters.assignee.length ? filters.assignee : undefined;
+  const wantStatus = filters.status && filters.status.length ? filters.status : undefined;
+  const wantLabel = filters.label && filters.label.length ? filters.label : undefined;
+  const wantParent = filters.parent && filters.parent.length ? filters.parent.map((p) => normalizeId(p, doc.pattern)) : undefined;
+  let items = (doc.sections.get(OPEN_SECTION) ?? []).filter((it) => {
+    if (isBlocked(doc, it))
+      return false;
+    if (wantAssignee) {
+      if (!it.assignee || !wantAssignee.includes(it.assignee))
+        return false;
+    } else if (it.assignee)
+      return false;
+    if (wantStatus && (!it.status || !wantStatus.includes(it.status)))
+      return false;
+    if (wantLabel && !it.labels.some((l) => wantLabel.includes(l)))
+      return false;
+    if (wantParent) {
+      const p = it.partOf ? normalizeId(it.partOf, doc.pattern) : undefined;
+      if (!p || !wantParent.includes(p))
+        return false;
+    }
+    return true;
+  });
+  if (filters.limit !== undefined && filters.limit >= 0)
+    items = items.slice(0, filters.limit);
+  return items;
 }
 function frontierRow(it) {
   const more = it.detail.length ? " …" : "";
   return `  ${it.id}  ${it.title}${more}`;
 }
-function cmdReady(doc) {
-  const items = frontier(doc);
+function cmdReady(doc, filters = {}) {
+  const items = frontier(doc, filters);
   if (!items.length)
-    return "No takeable issues.";
+    return diagnoseEmpty(doc, filters);
   return items.map(frontierRow).join(`
 `);
 }
-function cmdNext(doc) {
-  const top = frontier(doc)[0];
-  return top ? frontierRow(top) : "No takeable issues.";
+function cmdNext(doc, filters = {}) {
+  const top = frontier(doc, { ...filters, limit: undefined })[0];
+  return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
 }
-var VALUE_FLAGS = new Set(["note"]);
+function diagnoseEmpty(doc, filters) {
+  const open = doc.sections.get(OPEN_SECTION) ?? [];
+  if (!open.length)
+    return "No open issues.";
+  const filtered = (filters.status?.length ?? 0) + (filters.label?.length ?? 0) + (filters.parent?.length ?? 0) + (filters.assignee?.length ?? 0);
+  if (filtered)
+    return "No takeable issues match the filter.";
+  const blocked = open.filter((it) => isBlocked(doc, it));
+  const claimed = open.filter((it) => !isBlocked(doc, it) && it.assignee);
+  if (blocked.length === open.length) {
+    const waiting = openBlockersOf(doc, blocked);
+    return `${open.length} open, all blocked — waiting on ${waiting.join(", ")}.`;
+  }
+  if (claimed.length === open.length) {
+    const who = [...new Set(claimed.map((it) => `@${it.assignee}`))];
+    return `${open.length} open, all in progress — ${who.join(", ")}.`;
+  }
+  return `${open.length} open — ${blocked.length} blocked, ${claimed.length} in progress.`;
+}
+function openBlockersOf(doc, blocked) {
+  const open = openIdSet(doc);
+  const waiting = [];
+  const seen = new Set;
+  for (const it of blocked) {
+    for (const b of blockerIds(doc, it)) {
+      if (open.has(b) && !seen.has(b)) {
+        seen.add(b);
+        waiting.push(b);
+      }
+    }
+  }
+  return waiting;
+}
+var VALUE_FLAGS = new Set(["note", "status", "label", "parent", "assignee", "limit"]);
+var REPEATABLE_FLAGS = new Set(["status", "label", "parent", "assignee"]);
 function parseArgs(argv) {
   const positionals = [];
   const flags = {};
+  const setValue = (key, value) => {
+    if (REPEATABLE_FLAGS.has(key)) {
+      const cur = flags[key];
+      if (Array.isArray(cur))
+        cur.push(value);
+      else
+        flags[key] = [value];
+    } else {
+      flags[key] = value;
+    }
+  };
   for (let i = 0;i < argv.length; i++) {
     const tok = argv[i] ?? "";
     if (tok.startsWith("--")) {
       const body = tok.slice(2);
       const eq = body.indexOf("=");
       if (eq !== -1)
-        flags[body.slice(0, eq)] = body.slice(eq + 1);
+        setValue(body.slice(0, eq), body.slice(eq + 1));
       else if (VALUE_FLAGS.has(body))
-        flags[body] = argv[++i] ?? "";
+        setValue(body, argv[++i] ?? "");
       else
         flags[body] = true;
     } else {
@@ -385,6 +540,17 @@ function parseArgs(argv) {
     }
   }
   return { positionals, flags };
+}
+function readFilters(flags) {
+  const arr = (v) => v === undefined ? undefined : Array.isArray(v) ? v : [String(v)];
+  const limit = typeof flags.limit === "string" ? Number(flags.limit) : undefined;
+  return {
+    status: arr(flags.status),
+    label: arr(flags.label),
+    parent: arr(flags.parent),
+    assignee: arr(flags.assignee),
+    limit: limit !== undefined && Number.isFinite(limit) ? limit : undefined
+  };
 }
 var HELP = `Usage: issues <command> [args]
 
@@ -428,9 +594,19 @@ function run(text, argv) {
         })
       });
     case "next":
-      return result({ text, mutated: false, output: cmdNext(doc) });
+      return result({
+        text,
+        mutated: false,
+        output: cmdNext(doc, readFilters(flags)),
+        warnings: graphWarnings(doc)
+      });
     case "ready":
-      return result({ text, mutated: false, output: cmdReady(doc) });
+      return result({
+        text,
+        mutated: false,
+        output: cmdReady(doc, readFilters(flags)),
+        warnings: graphWarnings(doc)
+      });
     case "show":
       return result({ text, mutated: false, output: cmdShow(doc, need(1, "id")) });
     case "add": {
@@ -468,6 +644,7 @@ export {
   parse,
   normalizeId,
   isBlocked,
+  graphWarnings,
   frontier,
   formatId,
   findIssue,

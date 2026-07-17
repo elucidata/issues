@@ -14,6 +14,7 @@ import {
 	cmdList,
 	isBlocked,
 	frontier,
+	graphWarnings,
 	cmdNext,
 	cmdReady,
 	run
@@ -505,10 +506,255 @@ describe('next / ready through the run seam', () => {
 	});
 
 	it('reports a normal empty frontier when nothing is takeable', () => {
+		// A mutual 001↔002 cycle: both open, both blocked → §4.5 all-blocked diagnosis.
 		const doc = `---\nnext_id: 3\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A. blocked-by:002\n\n- [ ] 002: B. blocked-by:001\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
 		const r = run(doc, ['next']);
 		expect(r.mutated).toBe(false);
 		expect(r.exitCode ?? 0).toBe(0);
-		expect(r.output).toMatch(/no takeable/i);
+		expect(r.output).toMatch(/all blocked/i);
+		expect(r.output).toContain('001');
+		expect(r.output).toContain('002');
+	});
+});
+
+// ── T3 — Complete derivation + full frontier (spec #11 Stage 3, §§3–4) ────────
+// A graph exercising every §3 anomaly at once: self-ref, dangling blocker,
+// dangling part-of, a won't-fix blocker (gate satisfied), and a mutual cycle.
+const GRAPH = `---
+next_id: 20
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Selfie. blocked-by:001
+
+- [ ] 002: Dangling blocker. blocked-by:999
+
+- [ ] 003: Orphan child. part-of:998
+
+- [ ] 004: Unblocked by a won't-fix. blocked-by:010
+
+- [ ] 005: Cycle A. blocked-by:006
+
+- [ ] 006: Cycle B. blocked-by:005
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+
+- [ ] 010: Rejected outright. (2026-06-07)
+`;
+
+describe('T3 graph derivation — self-reference (§3.1)', () => {
+	it('ignores a self-reference edge: A blocked-by A does not block', () => {
+		const doc = parse(GRAPH);
+		expect(isBlocked(doc, findIssue(doc, '001')!.issue)).toBe(false);
+	});
+});
+
+describe('T3 graph derivation — fail-open blocking (§3.1)', () => {
+	const doc = () => parse(GRAPH);
+
+	it('a dangling blocker fails open — 002 is takeable', () => {
+		expect(isBlocked(doc(), findIssue(doc(), '002')!.issue)).toBe(false);
+	});
+
+	it('a won\'t-fix blocker satisfies the gate — 004 is takeable', () => {
+		expect(isBlocked(doc(), findIssue(doc(), '004')!.issue)).toBe(false);
+	});
+
+	it('a dangling part-of carries no lifecycle effect — 003 stays takeable', () => {
+		expect(isBlocked(doc(), findIssue(doc(), '003')!.issue)).toBe(false);
+	});
+
+	it('mutual-cycle members stay blocked, never auto-broken', () => {
+		expect(isBlocked(doc(), findIssue(doc(), '005')!.issue)).toBe(true);
+		expect(isBlocked(doc(), findIssue(doc(), '006')!.issue)).toBe(true);
+	});
+});
+
+describe('T3 graph derivation — warnings (§3, fail-open advisories)', () => {
+	const warns = graphWarnings(parse(GRAPH));
+	const has = (re: RegExp) => warns.some((w) => re.test(w));
+
+	it('warns on a self-reference and reports the edge ignored', () => {
+		expect(has(/001.*self-ref/i)).toBe(true);
+	});
+
+	it('warns on a dangling blocker (id 999 found nowhere)', () => {
+		expect(has(/002.*999/)).toBe(true);
+	});
+
+	it('warns on a dangling part-of (parent 998 found nowhere)', () => {
+		expect(has(/003.*part-of.*998/i)).toBe(true);
+	});
+
+	it('emits the won\'t-fix-blocker advisory (gate satisfied by a rejected blocker)', () => {
+		expect(has(/004.*(won.?t.?fix|010)/i)).toBe(true);
+	});
+
+	it('detects the 005↔006 cycle and reports both members', () => {
+		const cycleWarn = warns.find((w) => /cycle/i.test(w));
+		expect(cycleWarn).toBeDefined();
+		expect(cycleWarn).toContain('005');
+		expect(cycleWarn).toContain('006');
+	});
+
+	it('a clean graph produces no warnings', () => {
+		expect(graphWarnings(parse(SAMPLE))).toEqual([]);
+	});
+});
+
+// A frontier exercising the claim gate and every filter dimension. 004 is claimed;
+// the rest are open, unblocked, and variously statused/labelled/contained.
+const FRONTIER = `---
+next_id: 20
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Map parent.
+
+- [ ] 002: Child A. part-of:001 status:ready-for-agent #frontend
+
+- [ ] 003: Child B. part-of:001 status:ready-for-human #backend
+
+- [ ] 004: Claimed work. @matt #frontend
+
+- [ ] 005: Other-map child. part-of:009 status:ready-for-agent #backend
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+
+describe('T3 frontier — claim gate & document order (§4.1)', () => {
+	const ids = (f = {}) => frontier(parse(FRONTIER), f).map((i) => i.id);
+
+	it('base frontier is open ∩ unblocked ∩ unclaimed, in document order', () => {
+		expect(ids()).toEqual(['001', '002', '003', '005']); // 004 is claimed → excluded
+	});
+});
+
+describe('T3 frontier — filters (§4.4)', () => {
+	const ids = (f: object) => frontier(parse(FRONTIER), f).map((i) => i.id);
+
+	it('--status narrows to a matching workflow value', () => {
+		expect(ids({ status: ['ready-for-agent'] })).toEqual(['002', '005']);
+	});
+
+	it('a repeated dimension ORs within it (label a OR b)', () => {
+		expect(ids({ label: ['frontend', 'backend'] })).toEqual(['002', '003', '005']);
+	});
+
+	it('--parent keeps only the direct children of one map', () => {
+		expect(ids({ parent: ['001'] })).toEqual(['002', '003']);
+	});
+
+	it('different dimensions AND together', () => {
+		expect(ids({ status: ['ready-for-agent'], label: ['backend'] })).toEqual(['005']);
+	});
+
+	it('--assignee drops the unclaimed gate and requires assignee == who', () => {
+		expect(ids({ assignee: ['matt'] })).toEqual(['004']);
+		expect(ids({ assignee: ['nobody'] })).toEqual([]);
+	});
+
+	it('--limit truncates the ordered frontier', () => {
+		expect(ids({ limit: 2 })).toEqual(['001', '002']);
+	});
+});
+
+describe('T3 empty frontier — diagnosed, exit 0 (§4.5)', () => {
+	const head = '---\nnext_id: 9\npattern: "###"\n---\n# T\n\n## Issues\n\n';
+	const tail = '\n\n## Completed\n\n## Deferred\n\n## Won\'t Fix\n';
+	const doc = (body: string) => head + body + tail;
+
+	it('no open issues → drained', () => {
+		expect(cmdReady(parse(doc('')))).toMatch(/no open issues/i);
+	});
+
+	it('all blocked → names the open ids being waited on', () => {
+		const out = cmdReady(parse(doc('- [ ] 001: A. blocked-by:002\n\n- [ ] 002: B. blocked-by:001')));
+		expect(out).toMatch(/all blocked/i);
+		expect(out).toContain('001');
+		expect(out).toContain('002');
+	});
+
+	it('all claimed → names the assignees in progress', () => {
+		const out = cmdReady(parse(doc('- [ ] 001: A. @matt\n\n- [ ] 002: B. @jane')));
+		expect(out).toMatch(/in progress/i);
+		expect(out).toContain('@matt');
+		expect(out).toContain('@jane');
+	});
+
+	it('a mix → summarizes the counts', () => {
+		const out = cmdReady(parse(doc('- [ ] 001: A. blocked-by:002\n\n- [ ] 002: B. @jane')));
+		expect(out).toMatch(/blocked/i);
+		expect(out).toMatch(/in progress|claimed/i);
+	});
+
+	it('next reports the same diagnosis as ready when empty', () => {
+		const d = parse(doc('- [ ] 001: A. @matt'));
+		expect(cmdNext(d)).toMatch(/in progress/i);
+	});
+
+	it('a filtered miss is distinguished from a drained frontier', () => {
+		const out = cmdReady(parse(FRONTIER), { status: ['does-not-exist'] });
+		expect(out).toMatch(/no takeable issues match/i);
+	});
+});
+
+describe('T3 frontier through the run seam (filters, warnings, exit code)', () => {
+	it('ready honors filters passed as flags, ANDing across dimensions', () => {
+		const r = run(FRONTIER, ['ready', '--status', 'ready-for-agent', '--label', 'backend']);
+		expect(r.output).toContain('005');
+		expect(r.output).not.toContain('002');
+		expect(r.mutated).toBe(false);
+	});
+
+	it('a repeated flag ORs within its dimension', () => {
+		const r = run(FRONTIER, ['ready', '--label', 'frontend', '--label', 'backend']);
+		expect(r.output).toContain('002');
+		expect(r.output).toContain('003');
+		expect(r.output).toContain('005');
+	});
+
+	it('--assignee relaxes the unclaimed gate', () => {
+		const r = run(FRONTIER, ['ready', '--assignee', 'matt']);
+		expect(r.output).toContain('004');
+		expect(r.output).not.toContain('001');
+	});
+
+	it('--limit caps ready', () => {
+		const r = run(FRONTIER, ['ready', '--limit', '2']);
+		const lines = r.output.trim().split('\n');
+		expect(lines).toHaveLength(2);
+	});
+
+	it('surfaces §3 advisories through RunResult.warnings, exit 0', () => {
+		const r = run(GRAPH, ['ready']);
+		expect(r.exitCode ?? 0).toBe(0);
+		expect(r.warnings.length).toBeGreaterThan(0);
+		expect(r.warnings.some((w) => /self-ref/i.test(w))).toBe(true);
+		expect(r.warnings.some((w) => /cycle/i.test(w))).toBe(true);
+		// Warnings never leak into stdout output.
+		expect(r.output).not.toMatch(/self-ref|cycle/i);
+	});
+
+	it('next carries the same warnings', () => {
+		expect(run(GRAPH, ['next']).warnings.length).toBeGreaterThan(0);
+	});
+
+	it('a clean read emits no warnings', () => {
+		expect(run(SAMPLE, ['ready']).warnings).toEqual([]);
 	});
 });
