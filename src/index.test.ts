@@ -34,6 +34,7 @@ The following issues were discovered while manually testing the app.
 ## Issues
 
 - [ ] 001: Styles aren't matching the mockups.
+
 - [ ] 005: (Embed) Mask the scrim so the captured element isn't obscured.
       When capturing a particular element, I'd like the scrim masked or cut out
       so the element that will be selected is unobscured.
@@ -76,6 +77,9 @@ describe('parse', () => {
 	});
 });
 
+// The round-trip guard, restated to the §7.2 invariant: a file in canonical
+// (blank-separated) form is a fixed point; single-`\n` input is accepted on read
+// and normalized to blank-separated on write. SAMPLE above is in canonical form.
 describe('serialize', () => {
 	it('round-trips a canonical file byte-for-byte', () => {
 		expect(serialize(parse(SAMPLE))).toBe(SAMPLE);
@@ -84,6 +88,50 @@ describe('serialize', () => {
 	it('is idempotent', () => {
 		const once = serialize(parse(SAMPLE));
 		expect(serialize(parse(once))).toBe(once);
+	});
+
+	// The canonical boundary between entries 001 and 005 (blank-separated).
+	const CANONICAL_BOUNDARY = '- [ ] 001: Styles aren\'t matching the mockups.\n\n- [ ] 005:';
+
+	it('separates top-level entries with a blank line, keeping detail tight', () => {
+		const out = serialize(parse(SAMPLE));
+		// Blank line falls between top-level entries…
+		expect(out).toContain(CANONICAL_BOUNDARY);
+		// …but never before an indented detail line (that would detach the note).
+		expect(out).toContain(
+			'- [ ] 005: (Embed) Mask the scrim so the captured element isn\'t obscured.\n' +
+				'      When capturing a particular element'
+		);
+	});
+
+	it('normalizes tight single-`\\n` input to blank-separated on write (defined reflow)', () => {
+		const tight = SAMPLE.replace(CANONICAL_BOUNDARY, CANONICAL_BOUNDARY.replace('\n\n', '\n'));
+		expect(tight).not.toBe(SAMPLE); // the tight form really is different input
+		// Read accepts it; write reflows it to the canonical (blank-separated) form.
+		expect(serialize(parse(tight))).toBe(SAMPLE);
+	});
+
+	it('round-trips a metadata-free canonical file byte-for-byte', () => {
+		const plain = `---
+next_id: 3
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: First task.
+
+- [ ] 002: Second task.
+      A note under the second task.
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+		expect(serialize(parse(plain))).toBe(plain);
 	});
 });
 

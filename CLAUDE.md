@@ -21,10 +21,13 @@ Two layers, deliberately split:
 
 **Load-bearing invariant — byte-for-byte round-trip.** Frontmatter and preamble
 prose are preserved verbatim; only section bodies are regenerated
-deterministically. An untouched file serialized back out must be identical to the
-input, so hand-edits and CLI edits coexist without churn. The
-`serialize(parse(x)) === x` test in `src/index.test.ts` is the key guard — never
-break it.
+deterministically. The precise contract (ADR 0006 / design §7.2): **a file in
+canonical (blank-separated) form is a fixed point; single-`\n` input is accepted
+on read and normalized to blank-separated on write.** A canonical file serialized
+back out must be identical to the input, so hand-edits and CLI edits coexist
+without churn — reflow of a tight (single-`\n`) file on its first CLI write is
+defined behavior, not a bug. The `serialize(parse(x)) === x` test in
+`src/index.test.ts` is the key guard — never break it.
 
 ## Commands
 

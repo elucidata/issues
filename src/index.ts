@@ -167,7 +167,10 @@ export function serialize(doc: Doc): string {
 
 function renderSection(name: SectionName, issues: Issue[]): string {
 	let s = `## ${name}`;
-	if (issues.length) s += '\n\n' + issues.map(renderIssue).join('\n');
+	// Blank-line-separated canonical form (§7.1 / ADR 0006): top-level entry-blocks
+	// join with `\n\n`; renderIssue keeps each issue's detail tight under its parent,
+	// so blanks fall only between entries — never before an indented detail line.
+	if (issues.length) s += '\n\n' + issues.map(renderIssue).join('\n\n');
 	return s;
 }
 

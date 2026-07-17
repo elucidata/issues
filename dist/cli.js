@@ -123,6 +123,7 @@ function renderSection(name, issues) {
     s += `
 
 ` + issues.map(renderIssue).join(`
+
 `);
   return s;
 }
