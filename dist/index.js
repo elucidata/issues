@@ -9,7 +9,12 @@ var DETAIL_INDENT = "      ";
 var DEFAULT_PATTERN = "###";
 var ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
 var DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
-var BLOCKED_BY_SUFFIX_RE = /^(.*?)\s+blocked-by:([A-Za-z0-9]+(?:,[A-Za-z0-9]+)*)$/;
+var FIELD_RE = /^([A-Za-z][A-Za-z0-9_-]*):(\S+)$/;
+var ASSIGNEE_RE = /^@(\S+)$/;
+var LABEL_RE = /^#(\S+)$/;
+function isTailToken(tok) {
+  return FIELD_RE.test(tok) || ASSIGNEE_RE.test(tok) || LABEL_RE.test(tok);
+}
 function parse(text) {
   const lines = text.split(`
 `);
@@ -84,13 +89,63 @@ function toIssue(checked, id, rest, pattern) {
     title = dm[1] ?? rest;
     date = dm[2];
   }
+  const { title: bareTitle, tokens } = peelTail(title);
+  title = bareTitle;
+  let partOf;
   let blockedBy = [];
-  const bm = title.match(BLOCKED_BY_SUFFIX_RE);
-  if (bm) {
-    title = bm[1] ?? title;
-    blockedBy = (bm[2] ?? "").split(",");
+  let status;
+  let assignee;
+  const labels = [];
+  const uda = [];
+  for (const tok of tokens) {
+    const am = tok.match(ASSIGNEE_RE);
+    if (am) {
+      assignee = am[1];
+      continue;
+    }
+    const lm = tok.match(LABEL_RE);
+    if (lm) {
+      labels.push(lm[1]);
+      continue;
+    }
+    const fm = tok.match(FIELD_RE);
+    const key = fm[1];
+    const value = fm[2];
+    if (key === "part-of")
+      partOf = value;
+    else if (key === "blocked-by")
+      blockedBy = value.split(",");
+    else if (key === "status")
+      status = value;
+    else
+      uda.push({ key, value });
   }
-  return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, blockedBy, detail: [] };
+  return {
+    id: normalizeId(id, pattern),
+    num: idNum(id),
+    checked,
+    title,
+    date,
+    partOf,
+    blockedBy,
+    status,
+    assignee,
+    labels,
+    uda,
+    detail: []
+  };
+}
+function peelTail(rest) {
+  let s = rest;
+  const tokens = [];
+  while (true) {
+    const m = s.match(/^(.*\S)\s+(\S+)$/);
+    if (!m || !isTailToken(m[2]))
+      break;
+    tokens.unshift(m[2]);
+    s = m[1];
+  }
+  return { title: s, tokens };
 }
 function trimBlankEdges(arr) {
   let start = 0;
@@ -131,8 +186,18 @@ function renderSection(name, issues) {
 function renderIssue(issue) {
   const box = issue.checked ? "x" : " ";
   let line = `- [${box}] ${issue.id}: ${issue.title}`;
+  if (issue.partOf)
+    line += ` part-of:${issue.partOf}`;
   if (issue.blockedBy.length)
     line += ` blocked-by:${issue.blockedBy.join(",")}`;
+  for (const u of issue.uda)
+    line += ` ${u.key}:${u.value}`;
+  if (issue.status)
+    line += ` status:${issue.status}`;
+  if (issue.assignee)
+    line += ` @${issue.assignee}`;
+  for (const l of issue.labels)
+    line += ` #${l}`;
   if (issue.date)
     line += ` (${issue.date})`;
   const detail = issue.detail.map((d) => DETAIL_INDENT + d);
@@ -191,7 +256,7 @@ function cmdAdd(doc, title, note) {
   const id = formatId(doc.nextId, doc.pattern);
   const detail = note ? note.split(`
 `).map((l) => l.trimStart()) : [];
-  doc.sections.get(OPEN_SECTION).push({ id, num: doc.nextId, checked: false, title, blockedBy: [], detail });
+  doc.sections.get(OPEN_SECTION).push({ id, num: doc.nextId, checked: false, title, blockedBy: [], labels: [], uda: [], detail });
   doc.nextId += 1;
   return `Added ${id}: ${title}`;
 }

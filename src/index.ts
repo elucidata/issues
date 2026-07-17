@@ -38,13 +38,25 @@ const DETAIL_INDENT = '      '; // 6 spaces, aligning under the title
 const DEFAULT_PATTERN = '###';
 
 // ── Model ──────────────────────────────────────────────────────────────────
+// An unrecognized `key:value` tail token — a User-Defined Attribute, preserved
+// verbatim and asserted-about by nothing (§1.3).
+export interface Uda {
+	key: string;
+	value: string;
+}
+
 export interface Issue {
 	id: string; // canonical id, e.g. "007" (or "M007" under a prefixed pattern)
 	num: number; // numeric portion, e.g. 7
 	checked: boolean;
 	title: string;
 	date?: string; // ISO YYYY-MM-DD datestamp when closed/deferred
+	partOf?: string; // `part-of:` single id pointer, verbatim (read-only; §1.2, §3.2)
 	blockedBy: string[]; // `blocked-by:` id pointers, verbatim (read-only; §1.2)
+	status?: string; // `status:` workflow scalar, freeform (§2.2)
+	assignee?: string; // `@assignee` claim string, no sigil (§2.3)
+	labels: string[]; // `#label` category sigils, no sigil (§2.4)
+	uda: Uda[]; // unrecognized key:value tokens, in tail order (§1.3)
 	detail: string[]; // note lines, stored without indentation
 }
 
@@ -65,10 +77,17 @@ export interface Doc {
 // bare `007`), so a numeric-only `pattern` round-trips alongside prefixed ones.
 const ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
 const DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
-// A trailing `blocked-by:<id[,id]>` field peels off the tail of the issue line
-// (§1.2). T1 recognizes this one field; the rest of the tail vocabulary arrives
-// in T2. Value is comma-separated ids, stored verbatim so it round-trips.
-const BLOCKED_BY_SUFFIX_RE = /^(.*?)\s+blocked-by:([A-Za-z0-9]+(?:,[A-Za-z0-9]+)*)$/;
+// The tail vocabulary (§1.2). Fields peel off the *end* of the issue line, one
+// whitespace-delimited token at a time, until a token no longer looks like a
+// field or sigil — everything left of that boundary is the free-text title,
+// preserved verbatim (so a mid-line `see:here` or `@x` is never mistaken for
+// metadata). Two lexical shapes, both from todo.txt:
+const FIELD_RE = /^([A-Za-z][A-Za-z0-9_-]*):(\S+)$/; // key:value, no spaces
+const ASSIGNEE_RE = /^@(\S+)$/; // @assignee (single; §2.3)
+const LABEL_RE = /^#(\S+)$/; // #label (many; §2.4)
+function isTailToken(tok: string): boolean {
+	return FIELD_RE.test(tok) || ASSIGNEE_RE.test(tok) || LABEL_RE.test(tok);
+}
 
 // ── Parse ────────────────────────────────────────────────────────────────
 export function parse(text: string): Doc {
@@ -146,15 +165,65 @@ function toIssue(checked: boolean, id: string, rest: string, pattern: string): I
 		title = dm[1] ?? rest;
 		date = dm[2];
 	}
-	// Peel the `blocked-by:` field off the tail (before the date suffix). Ids are
-	// kept verbatim — they are read-only pointers, normalized only at comparison.
+	// Peel the tail fields off (before the date suffix). Values are kept verbatim —
+	// relationship ids are read-only pointers, normalized only at comparison.
+	const { title: bareTitle, tokens } = peelTail(title);
+	title = bareTitle;
+	let partOf: string | undefined;
 	let blockedBy: string[] = [];
-	const bm = title.match(BLOCKED_BY_SUFFIX_RE);
-	if (bm) {
-		title = bm[1] ?? title;
-		blockedBy = (bm[2] ?? '').split(',');
+	let status: string | undefined;
+	let assignee: string | undefined;
+	const labels: string[] = [];
+	const uda: Uda[] = [];
+	for (const tok of tokens) {
+		const am = tok.match(ASSIGNEE_RE);
+		if (am) {
+			assignee = am[1];
+			continue;
+		}
+		const lm = tok.match(LABEL_RE);
+		if (lm) {
+			labels.push(lm[1]!);
+			continue;
+		}
+		const fm = tok.match(FIELD_RE)!; // isTailToken guaranteed one of the three shapes
+		const key = fm[1]!;
+		const value = fm[2]!;
+		if (key === 'part-of') partOf = value;
+		else if (key === 'blocked-by') blockedBy = value.split(',');
+		else if (key === 'status') status = value;
+		else uda.push({ key, value });
 	}
-	return { id: normalizeId(id, pattern), num: idNum(id), checked, title, date, blockedBy, detail: [] };
+	return {
+		id: normalizeId(id, pattern),
+		num: idNum(id),
+		checked,
+		title,
+		date,
+		partOf,
+		blockedBy,
+		status,
+		assignee,
+		labels,
+		uda,
+		detail: []
+	};
+}
+
+// Peel recognized tail tokens off the *end* of `rest`, right to left, stopping at
+// the first token that is not a field/sigil. Returns the remaining title (verbatim,
+// never re-split — so multi-space titles and mid-line colons survive) and the
+// peeled tokens in left-to-right order.
+function peelTail(rest: string): { title: string; tokens: string[] } {
+	let s = rest;
+	const tokens: string[] = [];
+	while (true) {
+		const m = s.match(/^(.*\S)\s+(\S+)$/);
+		if (!m || !isTailToken(m[2]!)) break;
+		tokens.unshift(m[2]!);
+		s = m[1]!;
+	}
+	return { title: s, tokens };
 }
 
 function trimBlankEdges(arr: string[]): string[] {
@@ -190,9 +259,16 @@ function renderSection(name: SectionName, issues: Issue[]): string {
 function renderIssue(issue: Issue): string {
 	const box = issue.checked ? 'x' : ' ';
 	let line = `- [${box}] ${issue.id}: ${issue.title}`;
-	// Tail fields re-emit after the title, before the date suffix (§1.2). T1: only
-	// `blocked-by:`. An empty list writes nothing, so metadata-free lines are untouched.
+	// Tail fields re-emit after the title, before the date suffix, in canonical
+	// order (§1.2 / the design example): part-of · blocked-by · UDAs · status ·
+	// @assignee · #labels. Every field is empty/absent by default, so a
+	// metadata-free line writes nothing after the title and stays byte-identical.
+	if (issue.partOf) line += ` part-of:${issue.partOf}`;
 	if (issue.blockedBy.length) line += ` blocked-by:${issue.blockedBy.join(',')}`;
+	for (const u of issue.uda) line += ` ${u.key}:${u.value}`;
+	if (issue.status) line += ` status:${issue.status}`;
+	if (issue.assignee) line += ` @${issue.assignee}`;
+	for (const l of issue.labels) line += ` #${l}`;
 	if (issue.date) line += ` (${issue.date})`;
 	const detail = issue.detail.map((d) => DETAIL_INDENT + d);
 	return [line, ...detail].join('\n');
@@ -262,9 +338,11 @@ export function today(): string {
 export function cmdAdd(doc: Doc, title: string, note?: string): string {
 	const id = formatId(doc.nextId, doc.pattern);
 	const detail = note ? note.split('\n').map((l) => l.trimStart()) : [];
+	// A bare `add` writes no tail fields — no `status:`, no sigils — so a
+	// metadata-free file stays byte-identical (§2.2, §8). Field flags arrive in T4.
 	doc.sections
 		.get(OPEN_SECTION)!
-		.push({ id, num: doc.nextId, checked: false, title, blockedBy: [], detail });
+		.push({ id, num: doc.nextId, checked: false, title, blockedBy: [], labels: [], uda: [], detail });
 	doc.nextId += 1;
 	return `Added ${id}: ${title}`;
 }

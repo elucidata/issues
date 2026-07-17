@@ -401,6 +401,90 @@ describe('blocked derivation (read-time, nothing stored)', () => {
 	});
 });
 
+// ── T2 — Widen the grammar: part-of, status, @assignee, #label, UDAs (#14) ───
+// The full metadata primitive on the tail (§1, design example), in canonical
+// field order so the fully-annotated line is a fixed point.
+const ANNOTATED = `---
+next_id: 8
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 002: Parent map.
+
+- [ ] 004: A blocker.
+
+- [ ] 007: Wire up the parser. part-of:002 blocked-by:004 type:bug status:in-progress @matt #parser #round-trip
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+
+describe('T2 tail grammar — parse & serialize', () => {
+	const issue = () => parse(ANNOTATED).sections.get('Issues')!.find((i) => i.id === '007')!;
+
+	it('peels every field kind off the tail into the model, leaving a clean title', () => {
+		const it7 = issue();
+		expect(it7.title).toBe('Wire up the parser.');
+		expect(it7.partOf).toBe('002');
+		expect(it7.blockedBy).toEqual(['004']);
+		expect(it7.status).toBe('in-progress');
+		expect(it7.assignee).toBe('matt');
+		expect(it7.labels).toEqual(['parser', 'round-trip']);
+	});
+
+	it('keeps an unrecognized key:value token as a verbatim UDA (§1.3)', () => {
+		expect(issue().uda).toEqual([{ key: 'type', value: 'bug' }]);
+	});
+
+	it('round-trips a fully-annotated line verbatim (fixed point)', () => {
+		expect(serialize(parse(ANNOTATED))).toBe(ANNOTATED);
+	});
+
+	it('leaves a metadata-free line byte-identical (SAMPLE still round-trips)', () => {
+		expect(serialize(parse(SAMPLE))).toBe(SAMPLE);
+	});
+
+	it('does not mistake a title colon/sigil in the middle of the line for a field', () => {
+		const doc = parse(
+			'---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Fix the see:here bug for @nobody now\n\n## Completed\n\n## Deferred\n\n## Won\'t Fix\n'
+		);
+		const it1 = doc.sections.get('Issues')![0]!;
+		expect(it1.title).toBe('Fix the see:here bug for @nobody now');
+		expect(it1.uda).toEqual([]);
+		expect(it1.assignee).toBeUndefined();
+	});
+
+	it('parses part-of/status/label singly and multiply per their arity', () => {
+		const doc = parse(
+			'---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Multi. blocked-by:003,004 #a #b\n\n## Completed\n\n## Deferred\n\n## Won\'t Fix\n'
+		);
+		const it1 = doc.sections.get('Issues')![0]!;
+		expect(it1.blockedBy).toEqual(['003', '004']);
+		expect(it1.labels).toEqual(['a', 'b']);
+	});
+});
+
+describe('T2 tail grammar through the run seam', () => {
+	it('add writes no status: — metadata-free output stays byte-identical', () => {
+		const r = run(SAMPLE, ['add', 'Plain new one']);
+		expect(r.text).toContain('- [ ] 007: Plain new one\n');
+		expect(r.text).not.toContain('status:');
+	});
+
+	it('edit preserves all trailing fields when replacing the title (§5.3)', () => {
+		const r = run(ANNOTATED, ['edit', '007', 'Retitled the parser work.']);
+		expect(r.text).toContain(
+			'- [ ] 007: Retitled the parser work. part-of:002 blocked-by:004 type:bug status:in-progress @matt #parser #round-trip'
+		);
+	});
+});
+
 describe('next / ready through the run seam', () => {
 	it('ready lists the whole unblocked frontier in document order', () => {
 		const out = cmdReady(parse(BLOCKED));

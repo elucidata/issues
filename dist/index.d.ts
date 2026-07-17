@@ -21,13 +21,22 @@
  */
 declare const SECTION_ORDER: readonly ['Issues', 'Completed', 'Deferred', "Won't Fix"];
 type SectionName = (typeof SECTION_ORDER)[number];
+export interface Uda {
+    key: string;
+    value: string;
+}
 export interface Issue {
     id: string;
     num: number;
     checked: boolean;
     title: string;
     date?: string;
+    partOf?: string;
     blockedBy: string[];
+    status?: string;
+    assignee?: string;
+    labels: string[];
+    uda: Uda[];
     detail: string[];
 }
 interface FrontmatterEntry {
