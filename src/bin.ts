@@ -17,6 +17,11 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { run } from './index';
+// The package manifest is the single source of truth for the tool's version. The
+// bundler **inlines** this JSON at build time, so `dist/cli.js` carries the literal
+// and prints it with zero runtime file I/O — the pure core (`./index`) stays
+// import-free, and only this shell knows the version.
+import pkg from '../package.json' with { type: 'json' };
 
 // Resolve `ISSUES.md` by walking up from the working directory; the package
 // hardcodes no depth in the tree, so it stays extraction-ready. An explicit
@@ -38,6 +43,13 @@ function resolveIssuesFile(): string {
 }
 
 function main(argv: string[]): void {
+	// `version` / `--version` is a shell concern — it reports *this tool's* version,
+	// not anything about `ISSUES.md`, so it answers before the file is even resolved.
+	if (argv[0] === 'version' || argv.includes('--version')) {
+		process.stdout.write(pkg.version + '\n');
+		return;
+	}
+
 	const filePath = resolveIssuesFile();
 	let text: string;
 	try {

@@ -7,6 +7,7 @@ var WONTFIX_SECTION = "Won't Fix";
 var CHECKED_SECTIONS = new Set([DONE_SECTION]);
 var DETAIL_INDENT = "      ";
 var DEFAULT_PATTERN = "###";
+var SUPPORTED_SCHEMA = 1;
 var ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
 var DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
 var FIELD_RE = /^([A-Za-z][A-Za-z0-9_-]*):(\S+)$/;
@@ -615,6 +616,22 @@ function graphWarnings(doc) {
   }
   return warnings;
 }
+function compatWarnings(doc) {
+  const entry = doc.frontmatter.find((e) => e.key === "schema");
+  if (!entry)
+    return [];
+  const raw = entry.raw.trim().replace(/^["']|["']$/g, "");
+  const n = Number(raw);
+  if (raw === "" || !Number.isFinite(n)) {
+    return [`schema:${raw} is not a recognized format version — proceeding, the file may not round-trip cleanly`];
+  }
+  if (n > SUPPORTED_SCHEMA) {
+    return [
+      `file declares schema ${n}; this build understands schema ${SUPPORTED_SCHEMA} — proceeding, it may not round-trip cleanly (upgrade \`issues\`)`
+    ];
+  }
+  return [];
+}
 function detectCycles(doc) {
   const openIds = openIdSet(doc);
   const adj = new Map;
@@ -977,6 +994,7 @@ Mutations:
   done <id> [--defer|--wontfix]    reopen <id>
   edit <id> "<title>"              note <id> "<text>"
   help                                                   show this message
+  version, --version                                     print the installed version
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)`;
@@ -1000,8 +1018,8 @@ function run(text, argv) {
   const quiet = !!flags.quiet;
   const wantJson = !!flags.json;
   const jsonOut = (d) => JSON.stringify(d, null, 2);
-  const advisories = () => quiet ? [] : graphWarnings(doc);
-  const edgeAdvisories = (id) => quiet ? [] : warningsFor(doc, id);
+  const advisories = () => quiet ? [] : [...compatWarnings(doc), ...graphWarnings(doc)];
+  const edgeAdvisories = (id) => quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
   switch (cmd) {
     case "list": {
       const opts = {
@@ -1133,6 +1151,7 @@ export {
   formatId,
   findIssue,
   doctorFindings,
+  compatWarnings,
   cmdUnset,
   cmdUnlabel,
   cmdUnblock,

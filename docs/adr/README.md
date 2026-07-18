@@ -16,3 +16,7 @@ normative build spec is
 - [0004 — Frontier query: one predicate, two projections, no auto-claim](0004-frontier-query.md)
 - [0005 — CLI surface: hybrid mutation model, JSON reads, advisory warnings](0005-cli-surface.md)
 - [0006 — Blank-line canonical rendering and the restated round-trip invariant](0006-blank-line-canonical-rendering.md)
+
+## Versioning
+
+- [0007 — `--version` and the file-format schema compatibility contract](0007-version-flag-and-schema-compat-contract.md)
