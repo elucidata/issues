@@ -37,6 +37,15 @@ const DETAIL_INDENT = '      '; // 6 spaces, aligning under the title
 // repo picks its own (e.g. `M##`) via the `pattern` frontmatter key.
 const DEFAULT_PATTERN = '###';
 
+// ── File-format schema (ADR 0007) ────────────────────────────────────────────
+// The ISSUES.md format is versioned by an optional `schema:` frontmatter key,
+// written for the *first time* only when a breaking format change ships; until
+// then no file carries it. Contract (ADR 0007): an absent key means the original
+// (legacy) format — `SUPPORTED_SCHEMA` — and is **never rejected**. A `schema:`
+// newer than this build understands is **advisory only** — it warns and proceeds,
+// never rejects, because the file is always yours to hand-edit.
+const SUPPORTED_SCHEMA = 1;
+
 // ── Model ──────────────────────────────────────────────────────────────────
 // An unrecognized `key:value` tail token — a User-Defined Attribute, preserved
 // verbatim and asserted-about by nothing (§1.3).
@@ -794,6 +803,30 @@ export function graphWarnings(doc: Doc): string[] {
 	return warnings;
 }
 
+/**
+ * The ADR 0007 file-format compat advisory. A file may carry an optional `schema:`
+ * frontmatter key naming its format version. This build understands
+ * `SUPPORTED_SCHEMA`; anything newer (or non-numeric) is surfaced as an advisory
+ * and **never blocks** the read or write — the file is always yours to hand-edit.
+ * An absent key is the original/legacy format: silent, never rejected. Dormant
+ * until a breaking format change first writes the key.
+ */
+export function compatWarnings(doc: Doc): string[] {
+	const entry = doc.frontmatter.find((e) => e.key === 'schema');
+	if (!entry) return []; // absent ⇒ legacy format ⇒ silent, never rejected
+	const raw = entry.raw.trim().replace(/^["']|["']$/g, '');
+	const n = Number(raw);
+	if (raw === '' || !Number.isFinite(n)) {
+		return [`schema:${raw} is not a recognized format version — proceeding, the file may not round-trip cleanly`];
+	}
+	if (n > SUPPORTED_SCHEMA) {
+		return [
+			`file declares schema ${n}; this build understands schema ${SUPPORTED_SCHEMA} — proceeding, it may not round-trip cleanly (upgrade \`issues\`)`
+		];
+	}
+	return []; // recognized (≤ supported) ⇒ silent
+}
+
 // Cycle detection (§3.1) over the open-section `blocked-by` graph — only edges to
 // still-open issues matter (a closed blocker satisfies the gate and cannot be part
 // of a live deadlock). Self-edges are skipped (reported separately). Classic
@@ -1258,6 +1291,7 @@ Mutations:
   done <id> [--defer|--wontfix]    reopen <id>
   edit <id> "<title>"              note <id> "<text>"
   help                                                   show this message
+  version, --version                                     print the installed version
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)`;
@@ -1298,10 +1332,14 @@ export function run(text: string, argv: string[]): RunResult {
 	const wantJson = !!flags.json;
 	const jsonOut = (d: unknown): string => JSON.stringify(d, null, 2);
 	// The §3 advisories a graph-reading command surfaces to stderr, gated by `-q`.
-	const advisories = (): string[] => (quiet ? [] : graphWarnings(doc));
+	// The ADR 0007 schema-compat advisory rides the same channel and leads, since a
+	// too-new file colours everything read below it.
+	const advisories = (): string[] => (quiet ? [] : [...compatWarnings(doc), ...graphWarnings(doc)]);
 	// Write-time advisories for an edge-touching mutation (§5 decision 8): only the
-	// warnings that name the issue whose edge just changed.
-	const edgeAdvisories = (id: string): string[] => (quiet ? [] : warningsFor(doc, id));
+	// warnings that name the issue whose edge just changed — plus the schema-compat
+	// advisory, so an older build writing a newer file always says so first.
+	const edgeAdvisories = (id: string): string[] =>
+		quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
 
 	switch (cmd) {
 		// ── Reads ────────────────────────────────────────────────────────────────

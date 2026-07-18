@@ -49,6 +49,7 @@ Mutations:
   done <id> [--defer|--wontfix]    reopen <id>
   edit <id> "<title>"              note <id> "<text>"
   help                                                   show this message
+  version, --version                                     print the installed version
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
@@ -74,6 +75,11 @@ Beyond open/closed sections, issues carry inline metadata on the tail of the lin
 `next`/`ready` are always the **takeable frontier** (open ∩ unblocked ∩ unclaimed);
 filters only narrow it. Warnings are advisory — stderr, exit 0, silenceable with `-q`.
 `doctor` is the exception: it exits nonzero when it finds anything, so it is CI-gateable.
+
+The optional `schema:` frontmatter key is **reserved** for a future file-format
+version and is written only when the format actually changes (ADR 0007). A file with
+no `schema:` is the current/legacy format and always reads; a `schema:` newer than
+your `issues` build warns and proceeds — never rejects. Nothing writes it today.
 
 ## The `--json` contract
 
