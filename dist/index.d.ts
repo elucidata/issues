@@ -141,6 +141,15 @@ export declare function isBlocked(doc: Doc, issue: Issue): boolean;
  * Exported for focused unit tests and reused by the read commands.
  */
 export declare function graphWarnings(doc: Doc): string[];
+/**
+ * The ADR 0007 file-format compat advisory. A file may carry an optional `schema:`
+ * frontmatter key naming its format version. This build understands
+ * `SUPPORTED_SCHEMA`; anything newer (or non-numeric) is surfaced as an advisory
+ * and **never blocks** the read or write — the file is always yours to hand-edit.
+ * An absent key is the original/legacy format: silent, never rejected. Dormant
+ * until a breaking format change first writes the key.
+ */
+export declare function compatWarnings(doc: Doc): string[];
 export interface FrontierFilters {
     status?: string[];
     label?: string[];

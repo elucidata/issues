@@ -29,6 +29,7 @@ import {
 	cmdTree,
 	cmdDoctor,
 	doctorFindings,
+	compatWarnings,
 	run
 } from './index';
 
@@ -1141,5 +1142,67 @@ describe('T4 isTakeable — the per-issue frontier predicate (§6)', () => {
 		expect(isTakeable(doc, findIssue(doc, '004')!.issue, 'Issues')).toBe(false); // claimed
 		expect(isTakeable(doc, findIssue(doc, '005')!.issue, 'Issues')).toBe(false); // blocked
 		expect(isTakeable(doc, findIssue(doc, '007')!.issue, 'Completed')).toBe(false); // closed
+	});
+});
+
+describe('ADR 0007 — file-format schema compat contract', () => {
+	// A file carrying a `schema:` newer than this build understands.
+	const NEWER = `---
+next_id: 2
+pattern: "###"
+schema: 99
+---
+# T
+
+## Issues
+
+- [ ] 001: A.
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+
+	it('an unversioned file (no schema key) is silent — absent ⇒ legacy, never rejected', () => {
+		expect(compatWarnings(parse(SAMPLE))).toEqual([]);
+	});
+
+	it('a recognized schema (≤ supported) is silent', () => {
+		const v1 = SAMPLE.replace('pattern: "###"', 'pattern: "###"\nschema: 1');
+		expect(compatWarnings(parse(v1))).toEqual([]);
+	});
+
+	it('a newer schema warns but never rejects — advisory only', () => {
+		const warns = compatWarnings(parse(NEWER));
+		expect(warns).toHaveLength(1);
+		expect(warns[0]).toMatch(/schema 99/);
+	});
+
+	it('a non-numeric schema warns rather than throwing', () => {
+		const bad = SAMPLE.replace('pattern: "###"', 'pattern: "###"\nschema: draft');
+		expect(compatWarnings(parse(bad))).toHaveLength(1);
+	});
+
+	it('the schema key round-trips verbatim — reserved, preserved, never rewritten', () => {
+		expect(serialize(parse(NEWER))).toBe(NEWER);
+	});
+
+	it('reads surface the compat advisory through RunResult.warnings, exit 0 (never rejects)', () => {
+		const r = run(NEWER, ['list']);
+		expect(r.exitCode ?? 0).toBe(0);
+		expect(r.warnings.some((w) => /schema 99/.test(w))).toBe(true);
+		expect(r.output).toContain('001'); // the file still reads normally
+	});
+
+	it('a mutation of a newer file still writes, leading with the compat advisory', () => {
+		const r = run(NEWER, ['add', 'B']);
+		expect(r.mutated).toBe(true);
+		expect(r.warnings.some((w) => /schema 99/.test(w))).toBe(true);
+	});
+
+	it('-q silences the compat advisory', () => {
+		expect(run(NEWER, ['list', '-q']).warnings).toEqual([]);
 	});
 });
