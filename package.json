@@ -1,38 +1,38 @@
 {
-	"name": "@elucidata/issues",
-	"version": "0.1.0",
-	"description": "A tiny, dependency-free issue tracker whose database is a human-editable ISSUES.md file.",
-	"type": "module",
-	"engines": {
-		"node": ">=22"
-	},
-	"bin": {
-		"issues": "./dist/cli.js"
-	},
-	"exports": {
-		".": {
-			"types": "./dist/index.d.ts",
-			"default": "./dist/index.js"
-		}
-	},
-	"files": [
-		"dist",
-		"ReadMe.md"
-	],
-	"scripts": {
-		"build": "bun build src/bin.ts --target node --outfile dist/cli.js && bun build src/index.ts --target node --outfile dist/index.js && bunx tsc -p tsconfig.build.json",
-		"test": "vitest run",
-		"test:watch": "vitest",
-		"check": "bunx tsc --noEmit",
-		"prepublishOnly": "bun run build"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/elucidata/issues.git"
-	},
-	"license": "MIT",
-	"devDependencies": {
-		"@types/node": "^22.10.0",
-		"vitest": "^4.1.8"
-	}
+  "name": "@elucidata/issues",
+  "version": "0.2.0",
+  "description": "A tiny, dependency-free issue tracker whose database is a human-editable ISSUES.md file.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "issues": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "ReadMe.md"
+  ],
+  "scripts": {
+    "build": "bun build src/bin.ts --target node --outfile dist/cli.js && bun build src/index.ts --target node --outfile dist/index.js && bunx tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "bunx tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/elucidata/issues.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "vitest": "^4.1.8"
+  }
 }
