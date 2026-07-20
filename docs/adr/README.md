@@ -20,3 +20,11 @@ normative build spec is
 ## Versioning
 
 - [0007 — `--version` and the file-format schema compatibility contract](0007-version-flag-and-schema-compat-contract.md)
+
+## Terminal output
+
+Compiled from [Wayfinder map #19](https://github.com/elucidata/issues/issues/19). The
+normative build spec is
+[`docs/design/terminal-output.md`](../design/terminal-output.md).
+
+- [0008 — Terminal output: state gutter, colour, `--plain`, and read filtering](0008-terminal-output-state-gutter-colour-plain.md)
