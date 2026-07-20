@@ -35,6 +35,8 @@ So the two axes rank the characters in nearly opposite orders, and neither ranki
 
 The one risk that applies uniformly to all five non-ASCII glyphs is **downstream `wcwidth` under `LANG=C`** (§4), which is a piping concern, not a display concern.
 
+Two facts from prior art (§5) bear directly on the `--plain` question: **gh ships `✓` U+2713 ungated** across Windows and CI with no fallback path at all, and the JS ecosystem's canonical fallback library (`figures`) degrades to **CP437, not ASCII** — using `×` U+00D7 as a *degradation target*. No modern CLI examined falls back to pure ASCII.
+
 ---
 
 ## 1. Unicode classification (primary source)
@@ -253,9 +255,15 @@ Two things follow:
 1. This does not affect what the terminal *displays* — modern emulators decode UTF-8 regardless of `LANG`. It affects **downstream libc-based consumers**: `column`, `less`, ncurses-based pagers, anything computing display width via `wcswidth`. Piping glyph output into those under `LANG=C` is where alignment actually dies, and it dies for all five non-ASCII glyphs equally.
 2. macOS libc does **not** widen Ambiguous characters under `ja_JP.UTF-8` — `×` measured 1, not 2. The ambiguous-wide behavior is a terminal-emulator setting, not a libc one, on this platform.
 
-### CI logs
+Node's own documentation (`doc/api/process.md`) confirms the general rule: JS strings are encoded to UTF-8 on write and the locale is never consulted for stdout. (The sync/async split it documents — files sync on both platforms, TTYs async on Windows and sync on POSIX, pipes the reverse — is orthogonal to encoding.)
 
-GitHub Actions log rendering and runner `LANG` values were not fully confirmed against primary sources within this pass — see Gaps below. What *is* established: the program emits well-formed UTF-8 unconditionally, so any consumer that decodes UTF-8 correctly renders the glyphs correctly, and no locale setting on the runner can change the bytes.
+### CI logs — partially unresolved
+
+**GitHub Actions runner `LANG` values could not be confirmed from a primary source.** What was found: [discussion #149813](https://github.com/orgs/community/discussions/149813) shows `LANG=` empty with `LC_CTYPE=POSIX`, but that is a *self-hosted container image*, explicitly not the hosted runner, and it drew no official reply. `runner-images#762` has no maintainer statement. Secondary sources claim `C.UTF-8` on hosted `ubuntu-latest`; no primary confirmation. Nothing found for `windows-latest` or for the log viewer's encoding.
+
+**This is likely moot regardless.** Per the verified result above, `LANG` does not affect the bytes a Node CLI emits — the CLI writes the same UTF-8 either way, and the Actions log viewer is a web UI consuming UTF-8. The cheap way to close this if it turns out to be load-bearing is one workflow job running `locale`.
+
+Cargo's behavior is a useful cross-check here: it suppresses *progress rendering* under `is_ci()`, but that is about redraw/ANSI control, not about character repertoire.
 
 ---
 
@@ -316,9 +324,75 @@ return isUTF8.test(ctype)
 | `⚠` warning | `‼` (U+203C) |
 | `❯` pointer | `>` |
 
-**This is a significant data point for `×` specifically.** `figures` uses `×` U+00D7 as the *fallback* — the character it emits when it has concluded the terminal does **not** support Unicode. It likewise falls back to `√` U+221A and `‼` U+203C, both non-ASCII. In other words, the most widely-installed glyph-fallback library in the JS ecosystem treats `×` as safe enough to be a **degradation target**, not a risk.
+**This is a significant data point for `×` specifically.** `figures` uses `×` U+00D7 as the *fallback* — the character it emits when it has concluded the terminal does **not** support Unicode. In other words, the most widely-installed glyph-fallback library in the JS ecosystem treats `×` as safe enough to be a **degradation target**, not a risk.
 
-Also notable: `figures` puts arrows (`↑↓←→`), `●`, box-drawing, and `…` in its `common` set with **no fallback at all** — they are emitted identically in both modes.
+**And `figures`' "fallback" is not ASCII at all — it is roughly the CP437 / legacy DOS console repertoire:**
+
+```js
+const specialFallbackSymbols = {
+	tick: '√',        info: 'i',       warning: '‼',     cross: '×',
+	squareSmall: '□', squareSmallFilled: '■',
+	circleCircle: '(○)',  circleCross: '(×)',  circlePipe: '(│)',
+	radioOn: '(*)',   checkboxOn: '[×]',  pointer: '>',
+	triangleUpOutline: '∆',  triangleLeft: '◄', triangleRight: '►',
+	lozenge: '♦',     lozengeOutline: '◊',  hamburger: '≡',
+	smiley: '☺',      mustache: '┌─┐',  star: '✶',  nodejs: '♦',
+	oneSeventh: '1/7', oneNinth: '1/9', oneTenth: '1/10'
+};
+```
+
+`√ ≡ ‼ ☺ ○ ◄ ► ♦` are all CP437 glyphs. (`× □ ◊ ∆ ✶` are not, so it is "approximately legacy DOS", not a strict code page.) The takeaway is that a widely-depended-on library does not consider "no Unicode support" to mean "ASCII only".
+
+Also notable: `figures` puts arrows (`↑↓←→`), `●`, box-drawing, and **`…`** in its `common` set with **no fallback at all** — 109 entries emitted byte-identically in both modes.
+
+### gh (GitHub CLI) — ships `✓` with no fallback whatsoever
+
+`pkg/iostreams/color.go`:
+
+```go
+func (c *ColorScheme) SuccessIconWithColor(colo func(string) string) string { return colo("✓") }
+func (c *ColorScheme) WarningIcon() string { return c.Yellow("!") }
+func (c *ColorScheme) FailureIconWithColor(colo func(string) string) string { return colo("X") }
+```
+
+Success is **`✓` U+2713 — the exact codepoint proposed here** — while failure and warning are plain ASCII `X` and `!`. gh gates *color* on TTY but **never gates glyphs**, and has no Windows or non-UTF-8 fallback path. Given gh's deployment breadth (including Windows and CI), this is the strongest single precedent in the set for `✓`.
+
+### cargo — gates exactly one character, and the polarity is instructive
+
+`src/util/progress.rs`:
+
+```rust
+let (ellipsis, ellipsis_width) = if self.unicode { ("…", 1) } else { ("...", 3) };
+```
+
+The progress bar itself is ASCII (`[====>  ] 3/4`); `…` is the only character cargo bothers to gate. Progress is suppressed entirely under quiet, `TERM=dumb`, or `is_ci()`.
+
+The capability check (`crates/cargo-util-terminal/src/shell.rs`):
+
+```rust
+fn supports_unicode(stream: &dyn IsTerminal) -> bool {
+    !stream.is_terminal() || supports_unicode::supports_unicode()
+}
+```
+
+**Note the polarity: a non-TTY short-circuits to `true`.** Piped, redirected, and CI output is *assumed Unicode-capable*; env sniffing runs only when the stream really is a terminal. This is the opposite of the intuition that piped output should be the conservative case.
+
+### git — strictly ASCII, and actively escapes non-ASCII out
+
+`git status --porcelain` output verified byte-wise via `od -c`: pure ASCII. Porcelain is an explicit stability contract. Beyond that, git *actively* escapes non-ASCII: `core.quotePath` defaults to true, so non-ASCII pathnames are C-quoted in output.
+
+### The four postures
+
+Across the tools examined, capability-gating falls into four distinct camps:
+
+| Posture | Tools | Behavior |
+|---|---|---|
+| No check — just ship Unicode | **gh** | `✓` unconditionally |
+| Check TTY/env, **default yes** | **cargo**, `is-unicode-supported` | non-TTY assumed capable |
+| Check locale, **default no** | **systemd**, `has-unicode` | `is_locale_utf8()`; both are the older designs |
+| Fall back to CP437, not ASCII | **figures** | `√ ≡ ‼ ☺ ×` |
+
+**Nobody in the modern camps falls back to pure ASCII.** `✓` has the strongest precedent of our set (gh ships it ungated); `…` is the one character cargo gates; box-drawing is treated as safe by figures but gated conservatively by rustc diagnostics.
 
 ---
 
@@ -342,8 +416,9 @@ Stated plainly rather than guessed at:
 - **Terminal.app's default** for "East Asian Ambiguous characters are wide" is strongly supported as off (users describe *enabling* it) but Apple does not document the default. iTerm2's default-off **is** source-verified.
 - **Consolas coverage of U+2298 is unverified** — this matters specifically for VS Code's integrated terminal on Windows, where Consolas is the default font. Consolas is widely reported to have limited Mathematical Operators coverage.
 - **The specific Windows fallback face for `⊘`** (Segoe UI Symbol vs Cambria Math vs other) was not pinned down; only that DirectWrite fallback fires and it is not tofu.
-- **GitHub Actions runner `LANG` values** and the Actions log viewer's Unicode handling were not confirmed from `actions/runner-images` or GitHub docs.
-- **Other CLIs** (gh, cargo, git, eza, pytest, prettier) were still being gathered when this was written; the systemd and JS-ecosystem findings above are complete and verified.
+- **GitHub Actions runner `LANG` values** and the Actions log viewer's Unicode handling remain unconfirmed from primary sources (§4). Probably moot — locale does not change the emitted bytes.
+- **The Windows console code-page question** was not resolved: what a legacy console (CP437/CP1252, i.e. not Windows Terminal) does with UTF-8 bytes from Node, and whether Node sets the output code page. This is the one genuinely open technical question left.
+- **eza, pytest, prettier, eslint** were not reached. gh, cargo, git, systemd, figures, is-unicode-supported and has-unicode are complete and verified.
 - Font measurements come from **one macOS machine plus current upstream releases** of Cascadia/DejaVu/JetBrains/Fira. OS-shipped faces (Menlo, Monaco, Courier New, SF Mono) are stable; the rest reflect specific released versions.
 
 ## Method
