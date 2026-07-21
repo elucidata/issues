@@ -422,8 +422,9 @@ Tick each box as it lands, with the commit that carried it.
       element colours; drop the section tags in glyph mode; restore them as `--plain`
       postfix tags with the casing rule (§5.2).
       ([#28](https://github.com/elucidata/issues/issues/28))
-- [ ] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
+- [x] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
       implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
+      ([#29](https://github.com/elucidata/issues/issues/29))
 - [ ] 5. **`show`** — one-line header; the `state:` field with
       suppression-when-closed; confined state colour; capitalized relationship
       suffixes and `Issues` → `Open` (§4).
@@ -474,10 +475,23 @@ Recorded as they land, per item 10.
   `treeLines` emits `id (part-of cycle)` in place of a row it refuses to recurse into,
   so it gets no gutter, no colour and no tags. It stands in *for* a row rather than
   being one — the one hole in §1.1's "every compact row".
-- **`--help` and `skills/issues/SKILL.md` were updated early** (item 7, partial, #28).
-  Item 7 is a later slice, but #28 is where the three flags first change what a user
-  sees, and CLAUDE.md requires the skill to track the CLI surface. Still owed by item
-  7: the README, and `--all` on `tree` once §3's default flip lands.
+- **`--help` and `skills/issues/SKILL.md` were updated early** (item 7, partial, #28
+  and #29). Item 7 is a later slice, but #28 is where the three flags first change what
+  a user sees, and CLAUDE.md requires the skill to track the CLI surface; #29 added
+  `tree`'s flag set and `--all`, which §9.1 calls load-bearing given the default flip.
+  Still owed by item 7: the README.
+- **Scaffolding's marker follows the colour *channel*, not the `--plain` flag**
+  (item 4, #29). §3.2's table names two modes, but the resolver produces three: colour,
+  `--no-color` (glyphs without colour, §5.4.2), and `--plain`. In the middle mode — and
+  in the far more common case of a piped, non-TTY stdout — `paint` is a no-op, so a
+  "dimmed" scaffolding row is byte-identical to a matching one and the filter goes
+  invisible. That is the one outcome §3.2 rules out ("an accepted, known misread, taken
+  over letting the filter become invisible"), so the trailing `/` now appears wherever
+  colour is unavailable, not only under `--plain`. The two modes the table *does* name
+  behave exactly as written.
+- **Non-matching descendants of a match are dropped** (item 4, #29). §3.2 grants the
+  exemption to ancestors only. A retained descendant would have no marker to
+  distinguish it from a match, and the filter would stop meaning anything below a hit.
 
 ### 9.1 Doc surface — what each one owes
 

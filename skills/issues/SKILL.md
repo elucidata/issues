@@ -32,11 +32,11 @@ If no `ISSUES.md` is found, run `issues add` which will create the file automati
 issues <command> [args]
 
 Reads (add --json for the machine contract; -q silences advisories):
-  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  list [--all|--closed|--deferred|--wontfix] [filters]   list issues (default: open)
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest
+  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -51,7 +51,7 @@ Mutations:
   help                                                   show this message
   version, --version                                     print the installed version
 
-filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+filters (list/next/ready/tree): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
 
 presentation (human-readable reads only; --json is never colourized):
@@ -129,7 +129,9 @@ issues block 7 --by 4                         # 7 is now blocked by 4
 issues assign 7 matt                          # claim it
 issues ready --status ready-for-agent --json  # machine-readable takeable frontier
 issues next                                   # the topmost takeable issue
-issues tree                                   # containment forest
+issues tree                                   # containment forest (open by default)
+issues tree --all                             # every section
+issues tree --label parser                    # filtered; ancestors kept as scaffolding
 issues show 7 --children                      # dossier + subtree
 issues doctor                                 # lint; exit 1 on findings
 issues done 7                                 # -> Completed, datestamped (status voided)

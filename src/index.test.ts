@@ -1537,8 +1537,9 @@ describe('T6 the same row renderer everywhere — list, next, ready, tree, child
 	});
 
 	it('tree inherits the gutter without waiting on its own ticket', () => {
-		const out = run(T6, ['tree']).output;
+		const out = run(T6, ['tree', '--all']).output; // --all: #29 flipped tree to open-only
 		expect(rowFor(out, '003')).toContain('⊘ 003');
+		expect(rowFor(out, '004')).toContain('✓ 004');
 		expect(out).not.toContain('[Completed]'); // tag gone in glyph mode
 		expect(rowFor(run(T6, ['tree'], { color: true, plain: false }).output, '001')).toContain(
 			`${ESC}[36m001${ESC}[0m`
@@ -1546,7 +1547,7 @@ describe('T6 the same row renderer everywhere — list, next, ready, tree, child
 	});
 
 	it('tree under --plain drops the gutter and restores the tags', () => {
-		const out = run(T6, ['tree'], { color: false, plain: true }).output;
+		const out = run(T6, ['tree', '--all'], { color: false, plain: true }).output;
 		expect(out).not.toContain(ESC);
 		expect(rowFor(out, '003')).toBe('  003  Blocked. [blocked]');
 		expect(rowFor(out, '004')).toContain('[Completed] [blocked]');
@@ -1578,5 +1579,178 @@ describe('T6 --json is untouched by any of it (§7, §8)', () => {
 			expect(issues.length).toBeGreaterThan(0);
 			for (const it of issues) expect(it).not.toHaveProperty('state');
 		}
+	});
+});
+
+// ── T7 — tree: list's filters, open-by-default, ancestor scaffolding (§3, §7) ──
+
+const T7 = `---
+next_id: 11
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 001: Root.
+
+- [ ] 002: Match me. part-of:001 status:doing #api
+
+- [ ] 003: Middle. part-of:001 #ui
+
+- [ ] 004: Deep match. part-of:003 status:doing #api
+
+- [ ] 005: Unrelated open.
+
+- [ ] 009: Open under closed. part-of:006
+
+## Completed
+
+- [x] 006: Closed root. (2026-06-07)
+
+- [x] 007: Closed child. part-of:006 (2026-06-07)
+
+## Deferred
+
+- [ ] 008: Deferred one. (2026-06-07)
+
+## Won't Fix
+`;
+
+// The ids a rendered forest actually shows, in render order.
+const idsIn = (out: string) =>
+	out
+		.split('\n')
+		.map((l) => stripAnsi(l).match(/\b(\d{3})\b/)?.[1])
+		.filter(Boolean) as string[];
+
+describe('T7 tree — the same flag set as list (§3.1)', () => {
+	it('defaults to open — the breaking flip', () => {
+		const ids = idsIn(run(T7, ['tree']).output);
+		expect(ids).toContain('001');
+		expect(ids).toContain('009');
+		expect(ids).not.toContain('007'); // closed, and no open descendant
+		expect(ids).not.toContain('008'); // deferred
+	});
+
+	it('--all restores the every-section behaviour tree had before the flip', () => {
+		const ids = idsIn(run(T7, ['tree', '--all']).output);
+		for (const id of ['001', '002', '003', '004', '005', '006', '007', '008', '009']) {
+			expect(ids).toContain(id);
+		}
+	});
+
+	it('the section flags select the same issues list does', () => {
+		for (const flag of ['--all', '--closed', '--deferred', '--wontfix']) {
+			const treeIds = new Set(idsIn(run(T7, ['tree', flag]).output));
+			const listIds = new Set(idsIn(run(T7, ['list', flag]).output));
+			// tree may add ancestors as scaffolding, so list ⊆ tree, never the reverse.
+			for (const id of listIds) expect(treeIds).toContain(id);
+		}
+	});
+
+	it('the filters AND across dimensions and OR within one, exactly as list does', () => {
+		const matched = (argv: string[]) =>
+			new Set(idsIn(run(T7, ['list', ...argv]).output));
+		// #api OR #ui, AND status:doing → 002 and 004 both qualify.
+		expect(matched(['--label', 'api,ui', '--status', 'doing'])).toEqual(new Set(['002', '004']));
+		// A tree over the same filter matches the same issues (plus scaffolding).
+		const treeIds = new Set(idsIn(run(T7, ['tree', '--label', 'api,ui', '--status', 'doing']).output));
+		for (const id of ['002', '004']) expect(treeIds).toContain(id);
+	});
+
+	it('--parent and --assignee are accepted and narrow the forest', () => {
+		expect(idsIn(run(T7, ['tree', '--parent', '001']).output)).toContain('002');
+		expect(run(T7, ['tree', '--assignee', 'nobody']).output).toBe('No issues.');
+	});
+});
+
+describe('T7 tree — ancestor scaffolding (§3.2)', () => {
+	it('renders a non-matching ancestor in place, nothing stripped, nothing moved', () => {
+		const out = run(T7, ['tree', '--status', 'doing']).output;
+		expect(idsIn(out)).toEqual(['001', '002', '003', '004']);
+		// 003 is scaffolding but keeps its glyph, id, title and markers.
+		expect(stripAnsi(out)).toContain('- 003  Middle. #ui');
+	});
+
+	it('drops non-matching branches that contain no match', () => {
+		const ids = idsIn(run(T7, ['tree', '--status', 'doing']).output);
+		expect(ids).not.toContain('005'); // no match anywhere in it
+		expect(ids).not.toContain('009');
+	});
+
+	it('a closed ancestor of an open match is scaffolding under the default sections', () => {
+		const ids = idsIn(run(T7, ['tree']).output);
+		expect(ids).toContain('006'); // closed, kept as the path to open 009
+		expect(ids).toContain('009');
+		expect(ids).not.toContain('007'); // closed with no open descendant
+	});
+
+	it('containment reads identically to an unfiltered tree — depth is preserved', () => {
+		const filtered = run(T7, ['tree', '--status', 'doing']).output.split('\n');
+		const all = run(T7, ['tree', '--all']).output.split('\n');
+		const indentOf = (lines: string[], id: string) =>
+			stripAnsi(lines.find((l) => stripAnsi(l).includes(id))!).match(/^\s*/)![0].length;
+		for (const id of ['001', '002', '003', '004']) {
+			expect(indentOf(filtered, id)).toBe(indentOf(all, id));
+		}
+	});
+
+	it('in colour mode the whole scaffolding row dims — and carries no element colour', () => {
+		const out = run(T7, ['tree', '--status', 'doing'], { color: true, plain: false }).output;
+		const scaffold = out.split('\n').find((l) => l.includes('003'))!;
+		expect(scaffold).toBe(`    ${ESC}[2m- 003  Middle. #ui${ESC}[0m`);
+		expect(scaffold).not.toContain(`${ESC}[36m`); // no cyan id inside the dim span
+		expect(scaffold).not.toContain(`${ESC}[34m`); // no blue label either
+	});
+
+	it('a matching row keeps its element colours and does not dim', () => {
+		const out = run(T7, ['tree', '--status', 'doing'], { color: true, plain: false }).output;
+		const match = out.split('\n').find((l) => l.includes('004'))!;
+		expect(match).toContain(`${ESC}[36m004${ESC}[0m`);
+		expect(match).not.toContain(`${ESC}[2m`);
+	});
+
+	it('the marker follows the colour channel, not the flag — --no-color still marks it', () => {
+		// A dimmed row is byte-identical to a matching one when nothing can be dimmed,
+		// so the structural marker has to appear in every mode without colour: --plain,
+		// --no-color, and a piped (non-TTY) stdout. Otherwise the filter goes invisible,
+		// which is the one outcome §3.2 rules out.
+		const out = run(T7, ['tree', '--status', 'doing'], { color: false, plain: false }).output;
+		expect(out).not.toContain(ESC);
+		const row = (id: string) => out.split('\n').find((l) => l.includes(id))!;
+		expect(row('003')).toBe('    - 003  Middle. #ui /'); // scaffolding, gutter intact
+		expect(row('004')).toBe('      - 004  Deep match. status:doing #api'); // a match
+	});
+
+	it('under --plain scaffolding carries a trailing / and matches do not', () => {
+		const out = run(T7, ['tree', '--status', 'doing'], { color: false, plain: true }).output;
+		expect(out).not.toContain(ESC);
+		const row = (id: string) => out.split('\n').find((l) => l.includes(id))!;
+		expect(row('001')).toBe('  001  Root. /');
+		expect(row('003')).toBe('    003  Middle. #ui /');
+		expect(row('002')).toBe('    002  Match me. status:doing #api');
+		expect(row('004')).toBe('      004  Deep match. status:doing #api');
+	});
+
+	it('the trailing / sits last, after the postfix state tags', () => {
+		const out = run(T7, ['tree'], { color: false, plain: true }).output;
+		expect(out.split('\n').find((l) => l.includes('006'))).toBe('  006  Closed root. [Completed] /');
+	});
+});
+
+describe('T7 tree — what scaffolding does not touch (§3.2, §4.4)', () => {
+	it('scaffolding never reaches show — children render unfiltered', () => {
+		const out = run(T7, ['show', '001', '--children']).output;
+		expect(out).not.toContain(' /');
+		expect(idsIn(out)).toContain('003'); // rendered as an ordinary row
+	});
+
+	it('tree --json is unchanged — the machine forest stays unfiltered', () => {
+		const baseline = run(T7, ['tree', '--json']).output;
+		for (const argv of [['--status', 'doing'], ['--all'], ['--label', 'api']]) {
+			expect(run(T7, ['tree', '--json', ...argv]).output).toBe(baseline);
+		}
+		expect(JSON.parse(baseline)).toHaveLength(4); // 001, 005, 006 and 008 are the roots
 	});
 });

@@ -521,7 +521,7 @@ function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
     if (kids.length) {
       lines.push("  children:");
       for (const k of kids)
-        lines.push(...treeLines(doc, k, 2, render));
+        lines.push(...treeLines(doc, k, 2, render, undefined));
     }
   }
   if (!opts.quiet)
@@ -551,16 +551,23 @@ function markers(issue, color) {
   return s;
 }
 function compactRow(doc, issue, fields, render) {
-  const color = render.color && !render.plain;
+  const ansi = render.color && !render.plain;
+  const elementColor = ansi && !fields.scaffold;
   const section = sectionOf(doc, issue, fields.section);
-  const tail = (fields.markers ? markers(issue, color) : "") + (fields.date && issue.date ? ` (${issue.date})` : "") + (fields.note && issue.detail.length ? " …" : "");
+  const tail = (fields.markers ? markers(issue, elementColor) : "") + (fields.date && issue.date ? ` (${issue.date})` : "") + (fields.note && issue.detail.length ? " …" : "");
+  const scaffoldMark = fields.scaffold && !ansi ? " /" : "";
   if (render.plain) {
-    return `${fields.indent}${issue.id}  ${issue.title}${tail}${plainTags(doc, issue, section)}`;
+    const tags = plainTags(doc, issue, section);
+    return `${fields.indent}${issue.id}  ${issue.title}${tail}${tags}${scaffoldMark}`;
   }
   const { glyph, color: gutter } = STATE_GLYPHS[issueState(doc, issue, section)];
-  const title = section === OPEN_SECTION ? issue.title : paint(issue.title, "dim", color);
-  const id = paint(issue.id, "cyan", color);
-  return `${fields.indent}${paint(glyph, gutter, color)} ${id}  ${title}${tail}`;
+  if (fields.scaffold) {
+    const row = `${glyph} ${issue.id}  ${issue.title}${tail}${scaffoldMark}`;
+    return fields.indent + paint(row, "dim", ansi);
+  }
+  const title = section === OPEN_SECTION ? issue.title : paint(issue.title, "dim", elementColor);
+  const id = paint(issue.id, "cyan", elementColor);
+  return `${fields.indent}${paint(glyph, gutter, elementColor)} ${id}  ${title}${tail}`;
 }
 function plainTags(doc, issue, section) {
   let s = "";
@@ -820,24 +827,52 @@ function childrenOf(doc, parentId) {
 function rootsOf(doc) {
   return allEntries(doc).filter((e) => !validParentId(doc, e.issue)).map((e) => e.issue);
 }
-function treeLines(doc, issue, depth, render, seen = new Set) {
+function treeView(doc, opts, filters) {
+  const sections = new Set(listSections(opts));
+  const matched = new Set;
+  const hits = [];
+  for (const { section, issue } of allEntries(doc))
+    if (sections.has(section) && listFilter(doc, issue, filters)) {
+      matched.add(issue.id);
+      hits.push(issue);
+    }
+  const visible = new Set(matched);
+  for (const hit of hits) {
+    let cur = hit;
+    const guard = new Set([hit.id]);
+    for (;; ) {
+      const parent = cur ? validParentId(doc, cur) : undefined;
+      if (!parent || guard.has(parent))
+        break;
+      guard.add(parent);
+      visible.add(parent);
+      cur = findIssue(doc, parent)?.issue;
+    }
+  }
+  const scaffold = new Set([...visible].filter((id) => !matched.has(id)));
+  return { visible, scaffold };
+}
+function treeLines(doc, issue, depth, render, view, seen = new Set) {
+  if (view && !view.visible.has(issue.id))
+    return [];
   const indent = "  ".repeat(depth + 1);
   if (seen.has(issue.id))
     return [`${indent}${issue.id} (part-of cycle)`];
   seen.add(issue.id);
-  const out = [compactRow(doc, issue, { indent, markers: true }, render)];
+  const scaffold = view?.scaffold.has(issue.id);
+  const out = [compactRow(doc, issue, { indent, markers: true, scaffold }, render)];
   for (const k of childrenOf(doc, issue.id))
-    out.push(...treeLines(doc, k, depth + 1, render, seen));
+    out.push(...treeLines(doc, k, depth + 1, render, view, seen));
   return out;
 }
-function cmdTree(doc, render = DEFAULT_RENDER) {
-  const roots = rootsOf(doc);
-  if (!roots.length)
-    return "No issues.";
+function cmdTree(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
+  const view = treeView(doc, opts, filters);
   const seen = new Set;
   const lines = [];
-  for (const r of roots)
-    lines.push(...treeLines(doc, r, 0, render, seen));
+  for (const r of rootsOf(doc))
+    lines.push(...treeLines(doc, r, 0, render, view, seen));
+  if (!lines.length)
+    return "No issues.";
   return lines.join(`
 `);
 }
@@ -1016,6 +1051,14 @@ function firstStr(v) {
   const list = commaList(v);
   return list.length ? list[0] : undefined;
 }
+function readSections(flags) {
+  return {
+    all: !!flags.all,
+    closed: !!flags.closed,
+    deferred: !!flags.deferred,
+    wontfix: !!flags.wontfix
+  };
+}
 function readFilters(flags) {
   const arr = (v) => v === undefined ? undefined : commaList(v);
   const limit = typeof flags.limit === "string" ? Number(flags.limit) : undefined;
@@ -1030,11 +1073,11 @@ function readFilters(flags) {
 var HELP = `Usage: issues <command> [args]
 
 Reads (add --json for the machine contract; -q silences advisories):
-  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  list [--all|--closed|--deferred|--wontfix] [filters]   list issues (default: open)
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest
+  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -1049,7 +1092,7 @@ Mutations:
   help                                                   show this message
   version, --version                                     print the installed version
 
-filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+filters (list/next/ready/tree): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
 
 presentation (human-readable reads only; --json is never colourized):
@@ -1082,12 +1125,7 @@ function run(text, argv, render = DEFAULT_RENDER) {
   const edgeAdvisories = (id) => quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
   switch (cmd) {
     case "list": {
-      const opts = {
-        all: !!flags.all,
-        closed: !!flags.closed,
-        deferred: !!flags.deferred,
-        wontfix: !!flags.wontfix
-      };
+      const opts = readSections(flags);
       const filters = readFilters(flags);
       const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
@@ -1109,7 +1147,7 @@ function run(text, argv, render = DEFAULT_RENDER) {
       return result({ text, mutated: false, output });
     }
     case "tree": {
-      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, render);
+      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, readSections(flags), readFilters(flags), render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "doctor": {

@@ -729,7 +729,9 @@ export function cmdShow(
 		const kids = childrenOf(doc, issue.id);
 		if (kids.length) {
 			lines.push('  children:');
-			for (const k of kids) lines.push(...treeLines(doc, k, 2, render));
+			// No view — `show` renders every child unconditionally, so scaffolding has
+			// no analogue here (§4.4). Stated because it is an absence.
+			for (const k of kids) lines.push(...treeLines(doc, k, 2, render, undefined));
 		}
 	}
 	if (!opts.quiet) for (const w of warningsFor(doc, issue.id)) lines.push(`  ! ${w}`);
@@ -775,6 +777,9 @@ interface RowFields {
 	markers?: boolean;
 	date?: boolean;
 	note?: boolean; // the ` …` "has a note" ellipsis
+	// Not a field but a role: this row is a non-matching ancestor kept as the path to
+	// a match (§3.2), which changes how the whole row renders rather than what it shows.
+	scaffold?: boolean;
 }
 
 /**
@@ -793,20 +798,37 @@ interface RowFields {
  * here rather than trusting the caller to have resolved it that way.
  */
 function compactRow(doc: Doc, issue: Issue, fields: RowFields, render: RenderOptions): string {
-	const color = render.color && !render.plain;
+	// Is the colour channel open at all? `--plain` is the strongest presentation flag
+	// (§5.4.1), so it closes the channel here rather than trusting the caller.
+	const ansi = render.color && !render.plain;
+	// A scaffolding row recedes on contrast alone (§3.2), so nothing inside it is
+	// element-coloured — the row dims as a single span instead.
+	const elementColor = ansi && !fields.scaffold;
 	const section = sectionOf(doc, issue, fields.section);
 	const tail =
-		(fields.markers ? markers(issue, color) : '') +
+		(fields.markers ? markers(issue, elementColor) : '') +
 		(fields.date && issue.date ? ` (${issue.date})` : '') +
 		(fields.note && issue.detail.length ? ' …' : '');
+	// §3.2 gives scaffolding a structural marker under `--plain` because the colour
+	// channel is unavailable there. The same is true of `--no-color` and of a piped
+	// stdout — where a dimmed row is byte-identical to a matching one — so the marker
+	// follows the *channel*, not the flag. Anything else lets the filter go invisible,
+	// which is the one outcome §3.2 rules out.
+	const scaffoldMark = fields.scaffold && !ansi ? ' /' : '';
 	if (render.plain) {
-		return `${fields.indent}${issue.id}  ${issue.title}${tail}${plainTags(doc, issue, section)}`;
+		const tags = plainTags(doc, issue, section);
+		return `${fields.indent}${issue.id}  ${issue.title}${tail}${tags}${scaffoldMark}`;
 	}
 	const { glyph, color: gutter } = STATE_GLYPHS[issueState(doc, issue, section)];
+	if (fields.scaffold) {
+		// Glyph, id, title and markers all intact — the whole row just recedes (§3.2).
+		const row = `${glyph} ${issue.id}  ${issue.title}${tail}${scaffoldMark}`;
+		return fields.indent + paint(row, 'dim', ansi);
+	}
 	// The title dims when the issue is closed (§2) — de-emphasis, never a state claim.
-	const title = section === OPEN_SECTION ? issue.title : paint(issue.title, 'dim', color);
-	const id = paint(issue.id, 'cyan', color);
-	return `${fields.indent}${paint(glyph, gutter, color)} ${id}  ${title}${tail}`;
+	const title = section === OPEN_SECTION ? issue.title : paint(issue.title, 'dim', elementColor);
+	const id = paint(issue.id, 'cyan', elementColor);
+	return `${fields.indent}${paint(glyph, gutter, elementColor)} ${id}  ${title}${tail}`;
 }
 
 /**
@@ -1198,18 +1220,63 @@ function rootsOf(doc: Doc): Issue[] {
 // never drawn as structure (§5 decision 13). `seen` guards a pathological `part-of:`
 // cycle from recursing forever — that guard's line is the one row in the forest that
 // does not go through `compactRow`, because it stands in for a row rather than being one.
+/**
+ * Which issues a filtered `tree` renders (§3.2). `visible` is every match plus every
+ * ancestor on the path to one; `scaffold` is the difference — the ancestors that did
+ * not match themselves. An absent view means "render everything", which is what
+ * `show --children` wants (§4.4: scaffolding never reaches `show`).
+ */
+interface TreeView {
+	visible: Set<string>;
+	scaffold: Set<string>;
+}
+
+// Build the view: match on exactly `list`'s section + filter vocabulary (§3.1), then
+// walk each match's `part-of:` chain upward, keeping every ancestor. An ancestor is
+// kept whatever section it lives in — the path has to survive for containment to read
+// identically to an unfiltered tree, so a closed parent of an open match stays.
+function treeView(doc: Doc, opts: ListOptions, filters: FrontierFilters): TreeView {
+	const sections = new Set(listSections(opts));
+	const matched = new Set<string>();
+	const hits: Issue[] = [];
+	for (const { section, issue } of allEntries(doc))
+		if (sections.has(section) && listFilter(doc, issue, filters)) {
+			matched.add(issue.id);
+			hits.push(issue);
+		}
+
+	const visible = new Set(matched);
+	for (const hit of hits) {
+		let cur: Issue | undefined = hit;
+		const guard = new Set<string>([hit.id]); // a pathological part-of cycle terminates
+		for (;;) {
+			const parent: string | undefined = cur ? validParentId(doc, cur) : undefined;
+			if (!parent || guard.has(parent)) break;
+			guard.add(parent);
+			visible.add(parent);
+			cur = findIssue(doc, parent)?.issue;
+		}
+	}
+	const scaffold = new Set([...visible].filter((id) => !matched.has(id)));
+	return { visible, scaffold };
+}
+
 function treeLines(
 	doc: Doc,
 	issue: Issue,
 	depth: number,
 	render: RenderOptions,
+	view?: TreeView,
 	seen = new Set<string>()
 ): string[] {
+	if (view && !view.visible.has(issue.id)) return [];
 	const indent = '  '.repeat(depth + 1);
 	if (seen.has(issue.id)) return [`${indent}${issue.id} (part-of cycle)`];
 	seen.add(issue.id);
-	const out = [compactRow(doc, issue, { indent, markers: true }, render)];
-	for (const k of childrenOf(doc, issue.id)) out.push(...treeLines(doc, k, depth + 1, render, seen));
+	const scaffold = view?.scaffold.has(issue.id);
+	const out = [compactRow(doc, issue, { indent, markers: true, scaffold }, render)];
+	for (const k of childrenOf(doc, issue.id))
+		out.push(...treeLines(doc, k, depth + 1, render, view, seen));
 	return out;
 }
 
@@ -1218,13 +1285,23 @@ function treeLines(
  * issues with no valid parent (top-level or dangling `part-of:`); children nest by
  * `part-of:`. Blocking is carried by the row's state gutter (or a `[blocked]` tag under
  * `--plain`), never by tree structure.
+ *
+ * Filtered by exactly `list`'s vocabulary — the same section flags and the same
+ * predicate, so there is one filter language, not two (§3.1). **It defaults to open**;
+ * `--all` restores every section. Non-matching ancestors are kept as scaffolding,
+ * rendered in place and never moved (§3.2).
  */
-export function cmdTree(doc: Doc, render: RenderOptions = DEFAULT_RENDER): string {
-	const roots = rootsOf(doc);
-	if (!roots.length) return 'No issues.';
+export function cmdTree(
+	doc: Doc,
+	opts: ListOptions = {},
+	filters: FrontierFilters = {},
+	render: RenderOptions = DEFAULT_RENDER
+): string {
+	const view = treeView(doc, opts, filters);
 	const seen = new Set<string>();
 	const lines: string[] = [];
-	for (const r of roots) lines.push(...treeLines(doc, r, 0, render, seen));
+	for (const r of rootsOf(doc)) lines.push(...treeLines(doc, r, 0, render, view, seen));
+	if (!lines.length) return 'No issues.';
 	return lines.join('\n');
 }
 
@@ -1445,6 +1522,17 @@ function firstStr(v: FlagValue | undefined): string | undefined {
 	return list.length ? list[0] : undefined;
 }
 
+// The section flags (§4.4 / §3.1), read once and shared by `list` and `tree` so the
+// two cannot drift into separate vocabularies.
+function readSections(flags: Record<string, FlagValue>): ListOptions {
+	return {
+		all: !!flags.all,
+		closed: !!flags.closed,
+		deferred: !!flags.deferred,
+		wontfix: !!flags.wontfix
+	};
+}
+
 // Read the §4.4 filter set off the parsed flags. Repeatable/comma dimensions arrive
 // as arrays; a lone occurrence is normalized up to a one-element array.
 function readFilters(flags: Record<string, FlagValue>): FrontierFilters {
@@ -1463,11 +1551,11 @@ function readFilters(flags: Record<string, FlagValue>): FrontierFilters {
 const HELP = `Usage: issues <command> [args]
 
 Reads (add --json for the machine contract; -q silences advisories):
-  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  list [--all|--closed|--deferred|--wontfix] [filters]   list issues (default: open)
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest
+  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -1482,7 +1570,7 @@ Mutations:
   help                                                   show this message
   version, --version                                     print the installed version
 
-filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+filters (list/next/ready/tree): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
 
 presentation (human-readable reads only; --json is never colourized):
@@ -1546,12 +1634,7 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 	switch (cmd) {
 		// ── Reads ────────────────────────────────────────────────────────────────
 		case 'list': {
-			const opts: ListOptions = {
-				all: !!flags.all,
-				closed: !!flags.closed,
-				deferred: !!flags.deferred,
-				wontfix: !!flags.wontfix
-			};
+			const opts = readSections(flags);
 			const filters = readFilters(flags);
 			const output = wantJson
 				? jsonOut(cmdListJson(doc, opts, filters))
@@ -1577,7 +1660,11 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 			return result({ text, mutated: false, output });
 		}
 		case 'tree': {
-			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, render);
+			// `tree --json` is deliberately unfiltered — the machine forest is the whole
+			// forest, and §6's contract does not change here (§8).
+			const output = wantJson
+				? jsonOut(cmdTreeJson(doc))
+				: cmdTree(doc, readSections(flags), readFilters(flags), render);
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'doctor': {

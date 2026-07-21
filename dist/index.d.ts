@@ -218,8 +218,13 @@ export declare function cmdNext(doc: Doc, filters?: FrontierFilters, render?: Re
  * issues with no valid parent (top-level or dangling `part-of:`); children nest by
  * `part-of:`. Blocking is carried by the row's state gutter (or a `[blocked]` tag under
  * `--plain`), never by tree structure.
+ *
+ * Filtered by exactly `list`'s vocabulary — the same section flags and the same
+ * predicate, so there is one filter language, not two (§3.1). **It defaults to open**;
+ * `--all` restores every section. Non-matching ancestors are kept as scaffolding,
+ * rendered in place and never moved (§3.2).
  */
-export declare function cmdTree(doc: Doc, render?: RenderOptions): string;
+export declare function cmdTree(doc: Doc, opts?: ListOptions, filters?: FrontierFilters, render?: RenderOptions): string;
 export declare function doctorFindings(doc: Doc, text: string): string[];
 /** `doctor` — human-readable grouped findings; exit code is the caller's job (§5 decision 19). */
 export declare function cmdDoctor(doc: Doc, text: string): string;
