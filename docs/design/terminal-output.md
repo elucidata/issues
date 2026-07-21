@@ -438,16 +438,16 @@ Tick each box as it lands, with the commit that carried it.
       is documented (§9.1). (`--help` and SKILL.md landed early with
       [#28](https://github.com/elucidata/issues/issues/28) /
       [#29](https://github.com/elucidata/issues/issues/29); the README and the posture
-      with [#31](https://github.com/elucidata/issues/issues/31).)
+      with [#31](https://github.com/elucidata/issues/issues/31), `88c315b`.)
 - [x] 8. **Version** — bump `package.json` to `0.3.0`.
-      ([#31](https://github.com/elucidata/issues/issues/31))
+      ([#31](https://github.com/elucidata/issues/issues/31), `88c315b`)
 - [x] 9. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run
       `dist/` straight from GitHub. (Every slice rebuilt it;
-      [#31](https://github.com/elucidata/issues/issues/31) carries the `0.3.0` bundle.)
+      [#31](https://github.com/elucidata/issues/issues/31), `88c315b`, carries the `0.3.0` bundle.)
 - [x] 10. **Mark this spec `Implemented`** — flip the header's Status line, tick this
       checklist with commit refs, and record any deviations from the spec as an
       **Implementation notes** subsection here (§9.0).
-      ([#31](https://github.com/elucidata/issues/issues/31))
+      ([#31](https://github.com/elucidata/issues/issues/31), `88c315b`)
 
 Item 10 is not ceremony. Its predecessor spec
 ([`nested-issues-agentic-flow.md`](nested-issues-agentic-flow.md)) was fully built and
