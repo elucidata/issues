@@ -17,6 +17,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { run } from './index';
+import { resolveRenderOptions } from './options';
 // The package manifest is the single source of truth for the tool's version. The
 // bundler **inlines** this JSON at build time, so `dist/cli.js` carries the literal
 // and prints it with zero runtime file I/O — the pure core (`./index`) stays
@@ -58,8 +59,12 @@ function main(argv: string[]): void {
 		// Missing file is only fatal once we know the command needs it.
 		text = '';
 	}
+	// Terminal detection is exclusively a shell concern (design §6.1): the tri-state
+	// presentation flags, `NO_COLOR` and TTY-ness resolve here, and the pure core is
+	// handed the two booleans it renders from.
+	const render = resolveRenderOptions(argv, process.env, !!process.stdout.isTTY);
 	try {
-		const result = run(text, argv);
+		const result = run(text, argv, render);
 		if (result.mutated) writeFileSync(filePath, result.text);
 		if (result.output) process.stdout.write(result.output + '\n');
 		// Advisory §3 warnings ride their own channel — stderr, never mixed into

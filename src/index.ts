@@ -593,6 +593,94 @@ function declaredStatuses(doc: Doc): Set<string> | null {
 	return vals.length ? new Set(vals) : null;
 }
 
+// ── Terminal rendering primitives (design §1, §2, §6) ────────────────────────
+// The presentation surface the human-readable reads render through. The core never
+// sees the tri-state: `bin.ts` resolves `--plain` / `--color` / `--no-color`,
+// `NO_COLOR` and TTY-ness down to these two booleans (§6.1) — four combinations,
+// no environment, trivially testable.
+export interface RenderOptions {
+	color: boolean;
+	plain: boolean;
+}
+
+// The default every entry point falls back to: no colour, no plain rendering — what
+// a library consumer calling `cmdList(doc)` directly gets, and what the pre-flag
+// behaviour was.
+export const DEFAULT_RENDER: RenderOptions = { color: false, plain: false };
+
+/**
+ * The six-state vocabulary (§1). Precedence is **closed > blocked > claimed > open**:
+ * the gutter has one slot, and the highest applicable state takes it.
+ */
+export type IssueState = 'open' | 'claimed' | 'blocked' | 'completed' | 'deferred' | 'wontfix';
+
+const CLOSED_STATES: Partial<Record<SectionName, IssueState>> = {
+	[DONE_SECTION]: 'completed',
+	[DEFER_SECTION]: 'deferred',
+	[WONTFIX_SECTION]: 'wontfix'
+};
+
+/**
+ * Collapse an issue to the one state its gutter shows (§1). Pass `section` when the
+ * caller already knows it; otherwise it is looked up.
+ *
+ * The precedence is **semantic, not merely compression** — closed *subsumes* the
+ * derived axis. `isBlocked` does not consult the issue's own section, so a Completed
+ * issue with a reopened blocker still has `blocked === true`; but a finished issue is
+ * not *blocked*, and its assignee is provenance, not a claim. Do not "fix" that by
+ * surfacing the derived axis on closed issues — `show`'s `state:` field suppression
+ * (§4.2) depends on it reading exactly this way.
+ */
+export function issueState(doc: Doc, issue: Issue, section?: SectionName): IssueState {
+	const name = section ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
+	const closed = CLOSED_STATES[name];
+	if (closed) return closed;
+	if (isBlocked(doc, issue)) return 'blocked';
+	if (issue.assignee) return 'claimed';
+	return 'open';
+}
+
+/** The gutter glyph and its colour, per state (§1). `null` = uncoloured. */
+export const STATE_GLYPHS: Record<IssueState, { glyph: string; color: AnsiStyle | null }> = {
+	open: { glyph: '-', color: null },
+	claimed: { glyph: '~', color: 'yellow' },
+	blocked: { glyph: '⊘', color: 'red' },
+	completed: { glyph: '✓', color: 'green' },
+	deferred: { glyph: '»', color: 'dim' },
+	wontfix: { glyph: '×', color: 'dim' }
+};
+
+// Hand-written SGR codes — **8/16-colour only** (§0). No 256-colour, no truecolor,
+// no bright-white/bright-black, so output holds on both light and dark backgrounds.
+// Zero runtime dependencies: no `chalk`, no `supports-color`.
+const SGR: Record<AnsiStyle, number> = {
+	dim: 2,
+	red: 31,
+	green: 32,
+	yellow: 33,
+	blue: 34,
+	magenta: 35,
+	cyan: 36
+};
+const RESET = '\x1b[0m';
+
+export type AnsiStyle = 'dim' | 'red' | 'green' | 'yellow' | 'blue' | 'magenta' | 'cyan';
+
+/**
+ * Wrap `text` in an SGR pair — or return it untouched when `color` is false, so the
+ * colour gate is one boolean at every call site rather than a branch per line. A
+ * `null` style is also a no-op (open's gutter has no colour), so a table entry can
+ * be passed straight through.
+ *
+ * The terminator is a full reset, so styles do not nest: paint the innermost span,
+ * not an outer one that a nested reset would cut short.
+ */
+export function paint(text: string, style: AnsiStyle | AnsiStyle[] | null, color: boolean): string {
+	if (!color || style === null) return text;
+	const codes = (Array.isArray(style) ? style : [style]).map((s) => SGR[s]);
+	return `\x1b[${codes.join(';')}m${text}${RESET}`;
+}
+
 export interface ShowOptions {
 	children?: boolean;
 	quiet?: boolean; // -q: drop this issue's §3 advisories from the dossier (decision 8)
@@ -611,7 +699,13 @@ function warningsFor(doc: Doc, idInput: string): string[] {
  * `⊘ blocked`, the note body, this issue's §3 warnings, and (with `--children`) its
  * containment subtree. Its own render path — terminal output is never double-spaced.
  */
-export function cmdShow(doc: Doc, idInput: string, opts: ShowOptions = {}): string {
+export function cmdShow(
+	doc: Doc,
+	idInput: string,
+	opts: ShowOptions = {},
+	render: RenderOptions = DEFAULT_RENDER
+): string {
+	void render; // §6 plumbing — the dossier migrates onto it in a later slice (§9.5)
 	const { section, issue } = requireIssue(doc, idInput);
 	const mark = issue.checked ? ' [x]' : '';
 	const date = issue.date ? ` (${issue.date})` : '';
@@ -706,7 +800,13 @@ function listSections(opts: ListOptions): SectionName[] {
 	return set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
 }
 
-export function cmdList(doc: Doc, opts: ListOptions = {}, filters: FrontierFilters = {}): string {
+export function cmdList(
+	doc: Doc,
+	opts: ListOptions = {},
+	filters: FrontierFilters = {},
+	render: RenderOptions = DEFAULT_RENDER
+): string {
+	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const names = listSections(opts);
 	const blocks: string[] = [];
 	for (const name of names) {
@@ -925,14 +1025,24 @@ function frontierRow(it: Issue): string {
 }
 
 /** `ready` — the whole ordered takeable frontier (§4.2); empty is diagnosed (§4.5). */
-export function cmdReady(doc: Doc, filters: FrontierFilters = {}): string {
+export function cmdReady(
+	doc: Doc,
+	filters: FrontierFilters = {},
+	render: RenderOptions = DEFAULT_RENDER
+): string {
+	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const items = frontier(doc, filters);
 	if (!items.length) return diagnoseEmpty(doc, filters);
 	return items.map(frontierRow).join('\n');
 }
 
 /** `next` — the topmost takeable issue (`ready[0]`), or the same empty-diagnosis. */
-export function cmdNext(doc: Doc, filters: FrontierFilters = {}): string {
+export function cmdNext(
+	doc: Doc,
+	filters: FrontierFilters = {},
+	render: RenderOptions = DEFAULT_RENDER
+): string {
+	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const top = frontier(doc, { ...filters, limit: undefined })[0];
 	return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
 }
@@ -1036,7 +1146,8 @@ function treeLines(doc: Doc, issue: Issue, depth: number, seen = new Set<string>
  * issues with no valid parent (top-level or dangling `part-of:`); children nest by
  * `part-of:`. Blocking is a node annotation (`⊘`), never tree structure.
  */
-export function cmdTree(doc: Doc): string {
+export function cmdTree(doc: Doc, render: RenderOptions = DEFAULT_RENDER): string {
+	void render; // §6 plumbing — the forest migrates onto it in a later slice (§9.3/§9.4)
 	const roots = rootsOf(doc);
 	if (!roots.length) return 'No issues.';
 	const seen = new Set<string>();
@@ -1202,9 +1313,15 @@ const VALUE_FLAGS = new Set([
 // `add` flags accumulate the same way and are flattened at read time.
 const REPEATABLE_FLAGS = new Set(['status', 'label', 'parent', 'assignee', 'blocked-by']);
 
-type FlagValue = string | boolean | string[];
+export type FlagValue = string | boolean | string[];
 
-function parseArgs(argv: string[]): {
+/**
+ * The CLI's argument grammar. Exported so the shell resolves the presentation flags
+ * (§6.1) through the *same* parser `run` dispatches on — scanning raw argv instead
+ * would diverge the moment a value flag swallowed the next token (`--status --plain`
+ * means `status:--plain`, not plain rendering) or a flag arrived as `--json=1`.
+ */
+export function parseArgs(argv: string[]): {
 	positionals: string[];
 	flags: Record<string, FlagValue>;
 } {
@@ -1310,8 +1427,14 @@ function result(fields: Omit<RunResult, 'warnings'> & { warnings?: string[] }): 
 	return { warnings: [], ...fields };
 }
 
-/** Pure command runner — no filesystem access, for testing and reuse. */
-export function run(text: string, argv: string[]): RunResult {
+/**
+ * Pure command runner — no filesystem access, for testing and reuse.
+ *
+ * `render` is the already-resolved `{color, plain}` pair (§6.1); the shell resolves
+ * the tri-state flags, `NO_COLOR` and TTY-ness before calling. A library consumer
+ * that omits it gets uncoloured, non-plain output.
+ */
+export function run(text: string, argv: string[], render: RenderOptions = DEFAULT_RENDER): RunResult {
 	const { positionals, flags } = parseArgs(argv);
 	const cmd = positionals[0] ?? 'help';
 	if (cmd === 'help' || cmd === '--help' || flags.help) {
@@ -1351,17 +1474,19 @@ export function run(text: string, argv: string[]): RunResult {
 				wontfix: !!flags.wontfix
 			};
 			const filters = readFilters(flags);
-			const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters);
+			const output = wantJson
+				? jsonOut(cmdListJson(doc, opts, filters))
+				: cmdList(doc, opts, filters, render);
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'next': {
 			const filters = readFilters(flags);
-			const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters);
+			const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters, render);
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'ready': {
 			const filters = readFilters(flags);
-			const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters);
+			const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters, render);
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'show': {
@@ -1369,11 +1494,11 @@ export function run(text: string, argv: string[]): RunResult {
 			const opts: ShowOptions = { children: !!flags.children, quiet };
 			// `show` folds its issue's warnings into the dossier/JSON itself (§5 decision
 			// 17), so it does not also duplicate them on the stderr channel.
-			const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts);
+			const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts, render);
 			return result({ text, mutated: false, output });
 		}
 		case 'tree': {
-			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc);
+			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, render);
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'doctor': {

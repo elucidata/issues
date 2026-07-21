@@ -449,11 +449,52 @@ function declaredStatuses(doc) {
   const vals = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
   return vals.length ? new Set(vals) : null;
 }
+var DEFAULT_RENDER = { color: false, plain: false };
+var CLOSED_STATES = {
+  [DONE_SECTION]: "completed",
+  [DEFER_SECTION]: "deferred",
+  [WONTFIX_SECTION]: "wontfix"
+};
+function issueState(doc, issue, section) {
+  const name = section ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
+  const closed = CLOSED_STATES[name];
+  if (closed)
+    return closed;
+  if (isBlocked(doc, issue))
+    return "blocked";
+  if (issue.assignee)
+    return "claimed";
+  return "open";
+}
+var STATE_GLYPHS = {
+  open: { glyph: "-", color: null },
+  claimed: { glyph: "~", color: "yellow" },
+  blocked: { glyph: "⊘", color: "red" },
+  completed: { glyph: "✓", color: "green" },
+  deferred: { glyph: "»", color: "dim" },
+  wontfix: { glyph: "×", color: "dim" }
+};
+var SGR = {
+  dim: 2,
+  red: 31,
+  green: 32,
+  yellow: 33,
+  blue: 34,
+  magenta: 35,
+  cyan: 36
+};
+var RESET = "\x1B[0m";
+function paint(text, style, color) {
+  if (!color || style === null)
+    return text;
+  const codes = (Array.isArray(style) ? style : [style]).map((s) => SGR[s]);
+  return `\x1B[${codes.join(";")}m${text}${RESET}`;
+}
 function warningsFor(doc, idInput) {
   const id = normalizeId(idInput, doc.pattern);
   return graphWarnings(doc).filter((w) => w.includes(id));
 }
-function cmdShow(doc, idInput, opts = {}) {
+function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
   const { section, issue } = requireIssue(doc, idInput);
   const mark = issue.checked ? " [x]" : "";
   const date = issue.date ? ` (${issue.date})` : "";
@@ -545,7 +586,7 @@ function listSections(opts) {
     set.add(WONTFIX_SECTION);
   return set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
 }
-function cmdList(doc, opts = {}, filters = {}) {
+function cmdList(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
   const names = listSections(opts);
   const blocks = [];
   for (const name of names) {
@@ -700,14 +741,14 @@ function frontierRow(it) {
   const more = it.detail.length ? " …" : "";
   return `  ${it.id}  ${it.title}${more}`;
 }
-function cmdReady(doc, filters = {}) {
+function cmdReady(doc, filters = {}, render = DEFAULT_RENDER) {
   const items = frontier(doc, filters);
   if (!items.length)
     return diagnoseEmpty(doc, filters);
   return items.map(frontierRow).join(`
 `);
 }
-function cmdNext(doc, filters = {}) {
+function cmdNext(doc, filters = {}, render = DEFAULT_RENDER) {
   const top = frontier(doc, { ...filters, limit: undefined })[0];
   return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
 }
@@ -777,7 +818,7 @@ function treeLines(doc, issue, depth, seen = new Set) {
     out.push(...treeLines(doc, k, depth + 1, seen));
   return out;
 }
-function cmdTree(doc) {
+function cmdTree(doc, render = DEFAULT_RENDER) {
   const roots = rootsOf(doc);
   if (!roots.length)
     return "No issues.";
@@ -1001,7 +1042,7 @@ filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assign
 function result(fields) {
   return { warnings: [], ...fields };
 }
-function run(text, argv) {
+function run(text, argv, render = DEFAULT_RENDER) {
   const { positionals, flags } = parseArgs(argv);
   const cmd = positionals[0] ?? "help";
   if (cmd === "help" || cmd === "--help" || flags.help) {
@@ -1029,27 +1070,27 @@ function run(text, argv) {
         wontfix: !!flags.wontfix
       };
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters);
+      const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "next": {
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters);
+      const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "ready": {
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters);
+      const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "show": {
       const id = need(1, "id");
       const opts = { children: !!flags.children, quiet };
-      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts);
+      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts, render);
       return result({ text, mutated: false, output });
     }
     case "tree": {
-      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc);
+      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "doctor": {
@@ -1142,8 +1183,11 @@ export {
   today,
   serialize,
   run,
+  parseArgs,
   parse,
+  paint,
   normalizeId,
+  issueState,
   isTakeable,
   isBlocked,
   graphWarnings,
@@ -1176,5 +1220,7 @@ export {
   cmdDoctor,
   cmdBlock,
   cmdAssign,
-  cmdAdd
+  cmdAdd,
+  STATE_GLYPHS,
+  DEFAULT_RENDER
 };

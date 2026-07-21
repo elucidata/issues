@@ -1,13 +1,14 @@
 # Design spec — Terminal output: state gutter, colour, `--plain`, read filtering
 
-**Status:** **Locked — not yet implemented.** Every design decision below is settled
-and a build session can execute this document with no open questions, but no code has
-been written against it. §9's checklist is unticked; the last item is to flip this
-line to **Implemented** and tick the rest.
+**Status:** **Locked — build in progress.** Every design decision below is settled and
+a build session can execute this document with no open questions. §9's checklist
+tracks what has landed; the last item is to flip this line to **Implemented** and tick
+the rest.
 
 No production code shipped in the effort that produced this spec — the spec +
 [ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md) *are* the
-deliverable.
+deliverable. The build against it began with
+[#27](https://github.com/elucidata/issues/issues/27) (§9.1–§9.2).
 
 **Scope.** How the **human-readable** read surface of `@elucidata/issues` renders
 state: a leading state glyph on compact rows, terminal colour, a `--plain` escape
@@ -411,10 +412,12 @@ protection.
 The design is closed; this is a suggested implementation order, not new decisions.
 Tick each box as it lands, with the commit that carried it.
 
-- [ ] 1. **Shell** (`src/bin.ts`) — parse `--plain` / `--color` / `--no-color`;
-      resolve `{ color, plain }` per §6.1; thread it into every read command.
-- [ ] 2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1
+- [x] 1. **Shell** (`src/bin.ts` + `src/options.ts`) — parse `--plain` / `--color` /
+      `--no-color`; resolve `{ color, plain }` per §6.1; thread it into every read
+      command. ([#27](https://github.com/elucidata/issues/issues/27))
+- [x] 2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1
       precedence), the glyph table, an ANSI helper gated on the `color` boolean (§2).
+      ([#27](https://github.com/elucidata/issues/issues/27))
 - [ ] 3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter +
       element colours; drop the section tags in glyph mode; restore them as `--plain`
       postfix tags with the casing rule (§5.2).
@@ -442,6 +445,24 @@ still read `Locked` afterward, with nothing in the document to tell a reader it 
 shipped — because nothing in the document asked to be updated. Record deviations
 rather than silently correcting the spec to match the code; the gap between the two is
 the useful information.
+
+### 9.0 Implementation notes — deviations from the spec
+
+Recorded as they land, per item 10.
+
+- **§6.1's resolution lives in `src/options.ts`, not `src/bin.ts`** (item 1, #27).
+  `bin.ts` runs `main()` on import by design (an entry guard breaks under the bin
+  symlink), so nothing in it is unit-testable — and §6.1's six-rule order is exactly
+  what the ticket required tested end to end. The resolver is still shell-layer and
+  still pure: the environment and TTY-ness arrive as arguments, `bin.ts` remains the
+  only file that touches `process`, and the core still sees only the two booleans.
+- **`parseArgs` is exported from the core** (item 1, #27). The shell resolves the
+  presentation flags through the same parser `run` dispatches on, so the two cannot
+  disagree about what was passed — scanning raw argv would have mis-read
+  `--status --plain` (a value flag swallowing the next token) and `--json=1`.
+- **`doctor` does not take the render options** (item 1, #27). §1.1 scopes the state
+  vocabulary to `list` / `tree` / `next` / `ready` / `show`; `doctor` emits findings,
+  not compact rows, and no section of this spec gives it anything to render.
 
 ### 9.1 Doc surface — what each one owes
 

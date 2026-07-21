@@ -30,8 +30,13 @@ import {
 	cmdDoctor,
 	doctorFindings,
 	compatWarnings,
+	issueState,
+	STATE_GLYPHS,
+	paint,
 	run
 } from './index';
+import type { AnsiStyle } from './index';
+import { readFileSync } from 'node:fs';
 
 // Deterministic datestamps for any code path that calls today().
 beforeAll(() => {
@@ -1204,5 +1209,166 @@ schema: 99
 
 	it('-q silences the compat advisory', () => {
 		expect(run(NEWER, ['list', '-q']).warnings).toEqual([]);
+	});
+});
+
+// ── T5 — terminal-output rendering primitives (design §1, §2, §6) ────────────
+// The expand half of an expand–contract: the plumbing lands beside today's
+// rendering and changes no output. Tickets 2–4 migrate the renderers onto it.
+
+// Every row of the §1 precedence table, plus the two cases precedence exists for:
+// blocked+claimed (005) and closed-with-a-still-open-blocker (006, 008).
+const T5 = `---
+next_id: 9
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Open blocker.
+
+- [ ] 002: Plain open.
+
+- [ ] 003: Claimed. @matt
+
+- [ ] 004: Blocked. blocked-by:001
+
+- [ ] 005: Blocked and claimed. blocked-by:001 @matt
+
+## Completed
+
+- [x] 006: Completed with a still-open blocker. blocked-by:001 @matt (2026-06-07)
+
+## Deferred
+
+- [ ] 007: Deferred. (2026-06-07)
+
+## Won't Fix
+
+- [ ] 008: Won't fix. blocked-by:001 (2026-06-07)
+`;
+
+describe('T5 state resolver — precedence closed > blocked > claimed > open (§1)', () => {
+	const doc = parse(T5);
+	const state = (id: string) => issueState(doc, findIssue(doc, id)!.issue);
+
+	it('resolves every row of the precedence table', () => {
+		expect(state('002')).toBe('open');
+		expect(state('003')).toBe('claimed');
+		expect(state('004')).toBe('blocked');
+		expect(state('006')).toBe('completed');
+		expect(state('007')).toBe('deferred');
+		expect(state('008')).toBe('wontfix');
+	});
+
+	it('blocked + claimed resolves to blocked — one slot, highest wins', () => {
+		expect(state('005')).toBe('blocked');
+	});
+
+	it('closed subsumes the derived axis — closed + blocked resolves to the section', () => {
+		expect(state('006')).toBe('completed');
+		expect(state('008')).toBe('wontfix');
+	});
+
+	it('the derived axis is still true underneath — precedence is semantic, not a fix', () => {
+		// isBlocked does not consult the issue's own section (§1); ticket 4's `state:`
+		// suppression depends on this staying true.
+		expect(isBlocked(doc, findIssue(doc, '006')!.issue)).toBe(true);
+		expect(findIssue(doc, '006')!.issue.assignee).toBe('matt');
+	});
+
+	it('accepts an explicit section, skipping the lookup', () => {
+		expect(issueState(doc, findIssue(doc, '002')!.issue, 'Issues')).toBe('open');
+		expect(issueState(doc, findIssue(doc, '006')!.issue, 'Completed')).toBe('completed');
+	});
+});
+
+describe('T5 glyph table (§1)', () => {
+	it('carries the six glyphs and their gutter colours', () => {
+		expect(STATE_GLYPHS.open).toEqual({ glyph: '-', color: null });
+		expect(STATE_GLYPHS.claimed).toEqual({ glyph: '~', color: 'yellow' });
+		expect(STATE_GLYPHS.blocked).toEqual({ glyph: '⊘', color: 'red' });
+		expect(STATE_GLYPHS.completed).toEqual({ glyph: '✓', color: 'green' });
+		expect(STATE_GLYPHS.deferred).toEqual({ glyph: '»', color: 'dim' });
+		expect(STATE_GLYPHS.wontfix).toEqual({ glyph: '×', color: 'dim' });
+	});
+});
+
+describe('T5 ANSI helper — gated on the colour boolean, 8/16-colour only (§2, §6.2)', () => {
+	it('emits nothing at all when colour is false', () => {
+		expect(paint('ISS-001', 'cyan', false)).toBe('ISS-001');
+		for (const { glyph, color } of Object.values(STATE_GLYPHS)) {
+			expect(paint(glyph, color, false)).toBe(glyph);
+		}
+	});
+
+	it('wraps in an SGR pair when colour is true', () => {
+		expect(paint('ISS-001', 'cyan', true)).toBe('\x1b[36mISS-001\x1b[0m');
+		expect(paint('x', ['dim', 'cyan'], true)).toBe('\x1b[2;36mx\x1b[0m');
+	});
+
+	it('a null style is a no-op even when colour is true — open has no gutter colour', () => {
+		expect(paint('-', null, true)).toBe('-');
+	});
+
+	it('only ever emits 8/16-colour codes — no 256-colour, no truecolor, no bright', () => {
+		const codes = Object.values(STATE_GLYPHS)
+			.map((s) => paint('x', s.color, true))
+			.concat(['cyan', 'magenta', 'blue', 'yellow', 'dim'].map((c) => paint('x', c as AnsiStyle, true)))
+			.join('');
+		expect(codes).not.toMatch(/\x1b\[[0-9;]*(38|48);/); // 256-colour / truecolor
+		expect(codes).not.toMatch(/\x1b\[(9[0-7]|10[0-7])/); // bright / bright-background
+		for (const m of codes.matchAll(/\x1b\[([0-9;]*)m/g)) {
+			for (const n of (m[1] ?? '').split(';')) {
+				expect([0, 2, 31, 32, 33, 34, 35, 36]).toContain(Number(n));
+			}
+		}
+	});
+});
+
+describe('T5 render options thread through the read path, changing nothing (§6)', () => {
+	const READS = [['list'], ['next'], ['ready'], ['tree'], ['show', '005'], ['show', '005', '--children']];
+	const COMBOS = [
+		{ color: false, plain: false },
+		{ color: true, plain: false },
+		{ color: false, plain: true },
+		{ color: true, plain: true }
+	];
+
+	it('every read command accepts the options and is byte-identical in all four combinations', () => {
+		for (const argv of READS) {
+			const baseline = run(T5, argv).output;
+			for (const render of COMBOS) {
+				expect(run(T5, argv, render).output).toBe(baseline);
+			}
+		}
+	});
+
+	it('the flags parse on every read command without error', () => {
+		for (const argv of READS) {
+			for (const flag of ['--plain', '--color', '--no-color']) {
+				expect(() => run(T5, [...argv, flag])).not.toThrow();
+			}
+		}
+	});
+
+	it('--json output is untouched by the render options', () => {
+		for (const argv of [['list'], ['next'], ['ready'], ['tree'], ['show', '005']]) {
+			const baseline = run(T5, [...argv, '--json']).output;
+			for (const render of COMBOS) {
+				expect(run(T5, [...argv, '--json'], render).output).toBe(baseline);
+			}
+		}
+	});
+
+	it('the core still reads no process.env and probes no TTY', () => {
+		// Comments name both (they explain the boundary); only real code counts.
+		const src = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
+			.replace(/\/\*[\s\S]*?\*\//g, '')
+			.replace(/\/\/.*$/gm, '');
+		// `today()` is the one sanctioned env read (the ISSUES_DATE test hook).
+		expect([...src.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1])).toEqual(['ISSUES_DATE']);
+		expect(src).not.toMatch(/\bisTTY\b|\bNO_COLOR\b|process\.stdout/);
 	});
 });

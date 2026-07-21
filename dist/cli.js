@@ -455,11 +455,17 @@ function declaredStatuses(doc) {
   const vals = raw.split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
   return vals.length ? new Set(vals) : null;
 }
+var DEFAULT_RENDER = { color: false, plain: false };
+var CLOSED_STATES = {
+  [DONE_SECTION]: "completed",
+  [DEFER_SECTION]: "deferred",
+  [WONTFIX_SECTION]: "wontfix"
+};
 function warningsFor(doc, idInput) {
   const id = normalizeId(idInput, doc.pattern);
   return graphWarnings(doc).filter((w) => w.includes(id));
 }
-function cmdShow(doc, idInput, opts = {}) {
+function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
   const { section, issue } = requireIssue(doc, idInput);
   const mark = issue.checked ? " [x]" : "";
   const date = issue.date ? ` (${issue.date})` : "";
@@ -551,7 +557,7 @@ function listSections(opts) {
     set.add(WONTFIX_SECTION);
   return set.size ? SECTION_ORDER.filter((n) => set.has(n)) : [OPEN_SECTION];
 }
-function cmdList(doc, opts = {}, filters = {}) {
+function cmdList(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
   const names = listSections(opts);
   const blocks = [];
   for (const name of names) {
@@ -706,14 +712,14 @@ function frontierRow(it) {
   const more = it.detail.length ? " …" : "";
   return `  ${it.id}  ${it.title}${more}`;
 }
-function cmdReady(doc, filters = {}) {
+function cmdReady(doc, filters = {}, render = DEFAULT_RENDER) {
   const items = frontier(doc, filters);
   if (!items.length)
     return diagnoseEmpty(doc, filters);
   return items.map(frontierRow).join(`
 `);
 }
-function cmdNext(doc, filters = {}) {
+function cmdNext(doc, filters = {}, render = DEFAULT_RENDER) {
   const top = frontier(doc, { ...filters, limit: undefined })[0];
   return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
 }
@@ -783,7 +789,7 @@ function treeLines(doc, issue, depth, seen = new Set) {
     out.push(...treeLines(doc, k, depth + 1, seen));
   return out;
 }
-function cmdTree(doc) {
+function cmdTree(doc, render = DEFAULT_RENDER) {
   const roots = rootsOf(doc);
   if (!roots.length)
     return "No issues.";
@@ -1007,7 +1013,7 @@ filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assign
 function result(fields) {
   return { warnings: [], ...fields };
 }
-function run(text, argv) {
+function run(text, argv, render = DEFAULT_RENDER) {
   const { positionals, flags } = parseArgs(argv);
   const cmd = positionals[0] ?? "help";
   if (cmd === "help" || cmd === "--help" || flags.help) {
@@ -1035,27 +1041,27 @@ function run(text, argv) {
         wontfix: !!flags.wontfix
       };
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters);
+      const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "next": {
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters);
+      const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "ready": {
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters);
+      const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "show": {
       const id = need(1, "id");
       const opts = { children: !!flags.children, quiet };
-      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts);
+      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts, render);
       return result({ text, mutated: false, output });
     }
     case "tree": {
-      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc);
+      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, render);
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "doctor": {
@@ -1144,6 +1150,26 @@ function run(text, argv) {
 ${HELP}`);
   }
 }
+
+// src/options.ts
+function resolveRenderOptions(argv, env, isTTY) {
+  const { flags } = parseArgs(argv);
+  const plain = !!flags.plain;
+  return { color: resolveColor(flags, env, isTTY, plain), plain };
+}
+function resolveColor(flags, env, isTTY, plain) {
+  if (flags.json)
+    return false;
+  if (plain)
+    return false;
+  if (flags["no-color"])
+    return false;
+  if (flags.color)
+    return true;
+  if (env.NO_COLOR !== undefined)
+    return false;
+  return isTTY;
+}
 // package.json
 var package_default = {
   name: "@elucidata/issues",
@@ -1214,8 +1240,9 @@ function main(argv) {
   } catch {
     text = "";
   }
+  const render = resolveRenderOptions(argv, process.env, !!process.stdout.isTTY);
   try {
-    const result2 = run(text, argv);
+    const result2 = run(text, argv, render);
     if (result2.mutated)
       writeFileSync(filePath, result2.text);
     if (result2.output)
