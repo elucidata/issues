@@ -414,6 +414,11 @@ filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assign
 
 ## 6. `--json` read contract
 
+> **Amended by [ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md).**
+> The asymmetry this section implies is now normative: `--json` is the **only** stable
+> read surface, and human-readable output is explicitly unstable and may change in any
+> release — `--plain` included. This contract itself is unchanged.
+
 Every read/query command (`list`/`next`/`ready`/`show`/`tree`) accepts `--json` and
 emits a **stable machine contract** that includes the **derived** fields an agent
 needs without re-deriving them:

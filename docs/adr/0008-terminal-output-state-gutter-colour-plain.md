@@ -8,6 +8,8 @@
   [#23](https://github.com/elucidata/issues/issues/23) (compat),
   [#25](https://github.com/elucidata/issues/issues/25) (`show`)
 - **Spec:** [Terminal output](../design/terminal-output.md)
+- **Built by:** [#27](https://github.com/elucidata/issues/issues/27)–[#31](https://github.com/elucidata/issues/issues/31),
+  shipped in `0.3.0`. Departures from the spec are recorded in its §9.0.
 - **Amends:** [ADR 0005](0005-cli-surface.md) — `tree` gains `list`'s filters and
   defaults to open; the read commands gain `--plain` / `--color` / `--no-color`.
 

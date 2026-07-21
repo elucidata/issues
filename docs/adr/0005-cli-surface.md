@@ -3,6 +3,10 @@
 - **Status:** Accepted
 - **Ticket:** [#7 CLI surface & command set](https://github.com/elucidata/issues/issues/7)
 - **Spec:** [Nested issues & agentic-flow support §5](../design/nested-issues-agentic-flow.md#5-cli-surface--command-set)
+- **Amended by:** [ADR 0008](0008-terminal-output-state-gutter-colour-plain.md) — `tree`
+  gains `list`'s filters and defaults to open; the reads gain `--plain` / `--color` /
+  `--no-color`. ADR 0008 also makes the asymmetry normative: **`--json` is the only
+  stable read surface; human-readable output may change in any release.**
 - **Supersedes:** two sub-points of [ADR 0004](0004-frontier-query.md) (`--mine`, frontier-`--all`)
 
 ## Context

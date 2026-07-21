@@ -91,11 +91,11 @@ You never have to write this by hand — but you can, and the CLI will keep it t
 issues <command> [args]
 
 Reads (add --json for the machine contract; -q silences advisories):
-  list [--all|--closed|--deferred|--wontfix] [filters]  list issues (default: open)
+  list [--all|--closed|--deferred|--wontfix] [filters]   list issues (default: open)
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest (⊘ = blocked)
+  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -108,10 +108,71 @@ Mutations:
   done <id> [--defer|--wontfix]    reopen <id>
   edit <id> "<title>"              note <id> "<text>"
   help                                                   show this message
+  version, --version                                     print the installed version
 
-filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
+filters (list/next/ready/tree): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
+
+presentation (human-readable reads only; --json is never colourized):
+  --plain      no colour, no state gutter — state as postfix [tags] at the row's end
+               strongest of the three: --plain --color renders plain, silently
+  --color      force colour on;  --no-color  force it off but keep the gutter/glyphs
+               colour otherwise follows NO_COLOR and whether stdout is a terminal
+
+state gutter:  - open   ~ claimed   ⊘ blocked   ✓ completed   » deferred   × won't fix
+
+--json is the only stable read surface; human-readable output may change in any release.
 ```
+
+### Reading the output
+
+Every compact row leads with a **state gutter** — one glyph, coloured, carrying the
+issue's state:
+
+```
+  - 001  Land the tokenizer rewrite.
+  ~ 002  Parser drops trailing detail lines. status:doing @matt #bug
+  ⊘ 003  Backfill the round-trip corpus. #parser
+  ✓ 005  Pin the detail-line grammar. @jo (2026-06-07)
+```
+
+`-` open · `~` claimed · `⊘` blocked · `✓` completed · `»` deferred · `×` won't fix.
+Precedence is `closed > blocked > claimed > open`: one slot, highest state wins, and a
+blocked-and-claimed issue shows `⊘` with the claim carried by its `@who`. Right of the
+gutter everything is coloured by *element* — ids cyan, `status:` values yellow,
+`@assignee` magenta, `#label` blue — so the same field is the same colour on every row.
+
+**`--plain`** is the colour-free rendering: no gutter, state as postfix tags at the end
+of the row instead.
+
+```
+  001  Land the tokenizer rewrite.
+  003  Backfill the round-trip corpus. #parser [blocked]
+  005  Pin the detail-line grammar. @jo (2026-06-07) [Completed]
+```
+
+Capitalized tags are **stored** (the section the issue lives in); lowercase ones are
+**derived** at read time. A closed *and* blocked issue shows both.
+
+Three flags, one rule each:
+
+- **`--plain` is the strongest** presentation flag. `--plain --color` renders plain,
+  silently — so a script can pass `--color` unconditionally and stay `--plain`-able.
+- **`--plain` is not `--no-color`.** `--no-color` keeps the gutter and the glyphs; it is
+  the deliberate middle mode for a terminal that mangles colour but renders glyphs fine.
+- **`NO_COLOR`** (any value) turns colour off and never implies `--plain`. With no flags,
+  colour follows whether stdout is a terminal.
+
+### Output stability
+
+**`--json` is the only stable read surface. Human-readable output is explicitly
+unstable and may change in any release** — the gutter, the colours, and `tree`'s
+default are all free to move.
+
+One posture covers *all* human output, `--plain` included. `--plain` gives you the
+absence of escape codes, which is what piping to `grep` / `wc` / `fzf` needs; piping to
+a **parser** wants `--json`. At 0.x this declaration buys **permission**, not
+protection.
 
 `next`/`ready` are the **takeable frontier** — open ∩ every blocker closed ∩
 unclaimed, in document order — the one query an agent runs to pick up work;

@@ -1,14 +1,13 @@
 # Design spec — Terminal output: state gutter, colour, `--plain`, read filtering
 
-**Status:** **Locked — build in progress.** Every design decision below is settled and
-a build session can execute this document with no open questions. §9's checklist
-tracks what has landed; the last item is to flip this line to **Implemented** and tick
-the rest.
+**Status:** **Implemented** — shipped in `0.3.0`. Every §9 item is ticked with the
+commit that carried it, and every departure from what this document specifies is
+recorded in §9.0, not silently corrected here.
 
-No production code shipped in the effort that produced this spec — the spec +
-[ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md) *are* the
-deliverable. The build against it began with
-[#27](https://github.com/elucidata/issues/issues/27) (§9.1–§9.2).
+No production code shipped in the effort that *produced* this spec — the spec +
+[ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md) were the
+deliverable. The build against it ran as
+[#27](https://github.com/elucidata/issues/issues/27)–[#31](https://github.com/elucidata/issues/issues/31).
 
 **Scope.** How the **human-readable** read surface of `@elucidata/issues` renders
 state: a leading state glyph on compact rows, terminal colour, a `--plain` escape
@@ -414,34 +413,41 @@ Tick each box as it lands, with the commit that carried it.
 
 - [x] 1. **Shell** (`src/bin.ts` + `src/options.ts`) — parse `--plain` / `--color` /
       `--no-color`; resolve `{ color, plain }` per §6.1; thread it into every read
-      command. ([#27](https://github.com/elucidata/issues/issues/27))
+      command. ([#27](https://github.com/elucidata/issues/issues/27), `44cc5e5`)
 - [x] 2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1
       precedence), the glyph table, an ANSI helper gated on the `color` boolean (§2).
-      ([#27](https://github.com/elucidata/issues/issues/27))
+      ([#27](https://github.com/elucidata/issues/issues/27), `44cc5e5`)
 - [x] 3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter +
       element colours; drop the section tags in glyph mode; restore them as `--plain`
       postfix tags with the casing rule (§5.2).
-      ([#28](https://github.com/elucidata/issues/issues/28))
+      ([#28](https://github.com/elucidata/issues/issues/28), `74b780a`)
 - [x] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
       implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
-      ([#29](https://github.com/elucidata/issues/issues/29))
+      ([#29](https://github.com/elucidata/issues/issues/29), `72ad4e9`)
 - [x] 5. **`show`** — one-line header; the `state:` field with
       suppression-when-closed; confined state colour; capitalized relationship
       suffixes and `Issues` → `Open` (§4).
-      ([#30](https://github.com/elucidata/issues/issues/30))
+      ([#30](https://github.com/elucidata/issues/issues/30), `ba30bca`)
 - [x] 6. **Tests** — the four `{color, plain}` combinations across each read command;
       the precedence table; closed-and-blocked suppression on `show` and
       co-occurrence under `--plain`; a filtered `tree` with scaffolding in both modes.
-      ([#27](https://github.com/elucidata/issues/issues/27)–[#30](https://github.com/elucidata/issues/issues/30))
-- [ ] 7. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `README` to
+      ([#27](https://github.com/elucidata/issues/issues/27)–[#30](https://github.com/elucidata/issues/issues/30),
+      `44cc5e5`–`ba30bca`)
+- [x] 7. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `README` to
       teach the new flags and the glyph vocabulary; state §7's posture where `--json`
-      is documented (§9.1).
-- [ ] 8. **Version** — bump `package.json` to `0.3.0`.
-- [ ] 9. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run
-      `dist/` straight from GitHub.
-- [ ] 10. **Mark this spec `Implemented`** — flip the header's Status line, tick this
+      is documented (§9.1). (`--help` and SKILL.md landed early with
+      [#28](https://github.com/elucidata/issues/issues/28) /
+      [#29](https://github.com/elucidata/issues/issues/29); the README and the posture
+      with [#31](https://github.com/elucidata/issues/issues/31).)
+- [x] 8. **Version** — bump `package.json` to `0.3.0`.
+      ([#31](https://github.com/elucidata/issues/issues/31))
+- [x] 9. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run
+      `dist/` straight from GitHub. (Every slice rebuilt it;
+      [#31](https://github.com/elucidata/issues/issues/31) carries the `0.3.0` bundle.)
+- [x] 10. **Mark this spec `Implemented`** — flip the header's Status line, tick this
       checklist with commit refs, and record any deviations from the spec as an
-      **Implementation notes** subsection here.
+      **Implementation notes** subsection here (§9.0).
+      ([#31](https://github.com/elucidata/issues/issues/31))
 
 Item 10 is not ceremony. Its predecessor spec
 ([`nested-issues-agentic-flow.md`](nested-issues-agentic-flow.md)) was fully built and
@@ -477,11 +483,26 @@ Recorded as they land, per item 10.
   `treeLines` emits `id (part-of cycle)` in place of a row it refuses to recurse into,
   so it gets no gutter, no colour and no tags. It stands in *for* a row rather than
   being one — the one hole in §1.1's "every compact row".
-- **`--help` and `skills/issues/SKILL.md` were updated early** (item 7, partial, #28
-  and #29). Item 7 is a later slice, but #28 is where the three flags first change what
-  a user sees, and CLAUDE.md requires the skill to track the CLI surface; #29 added
-  `tree`'s flag set and `--all`, which §9.1 calls load-bearing given the default flip.
-  Still owed by item 7: the README.
+- **`--help` and `skills/issues/SKILL.md` were updated early** (item 7, split across
+  #28, #29 and #31). Item 7 is nominally the last slice, but #28 is where the three
+  flags first change what a user sees, and CLAUDE.md requires the skill to track the
+  CLI surface; #29 added `tree`'s flag set and `--all`, which §9.1 calls load-bearing
+  given the default flip. #31 finished the item: the README, and the §7 posture line
+  echoed into all three surfaces.
+- **The `--help` `list` line was realigned** (item 3, #29). Its description column sat
+  one space left of every other line — a pre-existing typo, fixed while the adjacent
+  `tree` line was being added rather than faithfully duplicated.
+- **Two tests were tightened, not just added** (items 3 and 6, #28). Both named a guard
+  they did not apply: the `--json` `state`-field check asserted on the response root,
+  which is an array for `list`/`ready`/`tree` and a wrapper for `next`, so it was
+  vacuous for four of five commands; and the core-purity check had lost its `NO_COLOR`
+  token guard to a false positive from the help text. Each fix was verified by mutation
+  — break the invariant, watch the test fail, restore. Recorded because a test that
+  passes vacuously is a gap the checklist would otherwise report as covered.
+- **The embedded `--help` copies are now pinned by a test** (item 7, #31). `ReadMe.md`
+  and `skills/issues/SKILL.md` each quote `--help`, and SKILL.md had already gone stale
+  once. The guard is bidirectional but covers only the fenced block: the README's
+  prose and example rows around it are still trust-based.
 - **Scaffolding's marker follows the colour *channel*, not the `--plain` flag**
   (item 4, #29). §3.2's table names two modes, but the resolver produces three: colour,
   `--no-color` (glyphs without colour, §5.4.2), and `--plain`. In the middle mode — and

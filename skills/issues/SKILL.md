@@ -56,10 +56,13 @@ filters (list/next/ready/tree): --status <s> | --label <n> | --parent <id> | --a
 
 presentation (human-readable reads only; --json is never colourized):
   --plain      no colour, no state gutter — state as postfix [tags] at the row's end
-  --color      force colour on;  --no-color  force it off (keeping the gutter)
+               strongest of the three: --plain --color renders plain, silently
+  --color      force colour on;  --no-color  force it off but keep the gutter/glyphs
                colour otherwise follows NO_COLOR and whether stdout is a terminal
 
 state gutter:  - open   ~ claimed   ⊘ blocked   ✓ completed   » deferred   × won't fix
+
+--json is the only stable read surface; human-readable output may change in any release.
 ```
 
 IDs are forgiving: `1`, `001`, `m1`, `M001` all resolve to the same canonical id.

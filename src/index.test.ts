@@ -1965,3 +1965,39 @@ describe('T8 show --json is unchanged (§4, §8)', () => {
 		expect(parsed.blocked).toBe(true);
 	});
 });
+
+// ── T9 — the docs cannot drift from the CLI surface ─────────────────────────
+// `ReadMe.md` and `skills/issues/SKILL.md` both embed a copy of `--help`. CLAUDE.md
+// requires the skill to track the CLI surface, and it went stale once already, so the
+// copies are pinned rather than trusted.
+//
+// Scope of the guard: the fenced help block only, and by line-membership rather than
+// order — the surrounding prose and the README's example rows are still trust-based.
+
+describe('T9 embedded --help copies stay in step with the real one', () => {
+	const help = run('', ['help']).output;
+	const embedded = (file: string) => {
+		const src = readFileSync(new URL('../' + file, import.meta.url), 'utf8');
+		const block = src.match(/```\nissues <command> \[args\]\n([\s\S]*?)\n```/);
+		expect(block, `${file} has no embedded help block`).toBeTruthy();
+		return block![1]!;
+	};
+
+	for (const file of ['ReadMe.md', 'skills/issues/SKILL.md']) {
+		it(`${file} quotes every line of --help verbatim`, () => {
+			const lines = help.split('\n');
+			for (const line of embedded(file).split('\n')) {
+				if (!line.trim()) continue;
+				expect(lines, `${file}: "${line}" is not in --help`).toContain(line);
+			}
+		});
+
+		it(`${file} documents every command and flag --help names`, () => {
+			const doc = embedded(file);
+			for (const line of help.split('\n')) {
+				if (!line.trim() || line.startsWith('Usage:')) continue;
+				expect(doc, `--help line missing from ${file}: "${line}"`).toContain(line);
+			}
+		});
+	}
+});
