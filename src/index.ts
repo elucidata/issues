@@ -82,9 +82,30 @@ export interface Doc {
 	sections: Map<SectionName, Issue[]>;
 }
 
-// The id is digits with an optional letter prefix (e.g. `M01`, `BZ007`, or a
-// bare `007`), so a numeric-only `pattern` round-trips alongside prefixed ones.
-const ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
+/**
+ * The issue-line shape a **given document** can contain: its own `pattern` prefix
+ * (everything before the trailing `#`s, verbatim, case-insensitively) then digits — or
+ * bare digits, so a `###` file that adopts a prefix still migrates on its next write.
+ *
+ * It is derived from `pattern` rather than fixed because the two ends have to agree:
+ * `formatId` emits the prefix verbatim, so a fixed class narrower than `pattern` makes
+ * the tool write lines it cannot read back, and `serialize` then drops them — silent
+ * data loss (that was the `ISS-###` bug).
+ *
+ * Widening it to *any* prefix instead is worse than the bug. `parse` normalizes every
+ * id it reads to the document's pattern, so a hand-written checklist item like
+ * `- [ ] TODO-1: buy milk` in a `###` file would be absorbed, rewritten to `001`, and
+ * collide with a real `001` — `done 001` would then hit the wrong issue, the
+ * round-trip invariant would break on write, and `doctor` would report the file clean.
+ * A prefix that does not match this document stays a malformed line and keeps its
+ * `doctor` finding.
+ */
+function issueLineRe(pattern: string): RegExp {
+	const prefix = pattern.replace(/#+$/, '');
+	const esc = prefix.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+	const id = esc ? `(?:${esc})?[0-9]+` : '[0-9]+';
+	return new RegExp(`^- \\[([ xX])\\] (${id}): (.*)$`, 'i');
+}
 const DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
 // The tail vocabulary (§1.2). Fields peel off the *end* of the issue line, one
 // whitespace-delimited token at a time, until a token no longer looks like a
@@ -137,7 +158,8 @@ export function parse(text: string): Doc {
 	}
 	const preamble = trimBlankEdges(lines.slice(i, firstSection)).join('\n');
 
-	// Sections.
+	// Sections. The id shape is fixed by the document's own `pattern`.
+	const issueRe = issueLineRe(pattern);
 	const sections = new Map<SectionName, Issue[]>();
 	for (const name of SECTION_ORDER) sections.set(name, []);
 	let current: Issue[] | null = null;
@@ -153,7 +175,7 @@ export function parse(text: string): Doc {
 			continue;
 		}
 		if (current === null || line.trim() === '') continue;
-		const m = line.match(ISSUE_RE);
+		const m = line.match(issueRe);
 		if (m) {
 			lastIssue = toIssue(m[1] !== ' ', m[2] ?? '', m[3] ?? '', pattern);
 			current.push(lastIssue);
@@ -1373,14 +1395,15 @@ export function doctorFindings(doc: Doc, text: string): string[] {
 		for (const { issue } of allEntries(doc))
 			if (issue.status && !declared.has(issue.status))
 				out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
-	out.push(...malformedLines(text));
+	out.push(...malformedLines(text, doc.pattern));
 	return out;
 }
 
 // Lines inside a section that are neither an issue line, an indented note, nor blank —
 // content the parser would silently drop. Scanned off the raw text (the model has
 // already discarded them).
-function malformedLines(text: string): string[] {
+function malformedLines(text: string, pattern: string): string[] {
+	const issueRe = issueLineRe(pattern);
 	const out: string[] = [];
 	let inSection = false;
 	for (const line of text.split('\n')) {
@@ -1389,7 +1412,7 @@ function malformedLines(text: string): string[] {
 			continue;
 		}
 		if (!inSection || line.trim() === '') continue;
-		if (ISSUE_RE.test(line) || /^\s+/.test(line)) continue;
+		if (issueRe.test(line) || /^\s+/.test(line)) continue;
 		out.push(`malformed line (not an issue or note): ${line.trim()}`);
 	}
 	return out;

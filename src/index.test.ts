@@ -2001,3 +2001,110 @@ describe('T9 embedded --help copies stay in step with the real one', () => {
 		});
 	}
 });
+
+// ── T10 — the parser must read every id the writer can produce ──────────────
+// `formatId` builds an id as `pattern` minus its trailing `#`s, plus zero-padded
+// digits — so `pattern: "ISS-###"` writes `ISS-042`. `ISSUE_RE` did not admit the
+// hyphen, so the tool wrote lines it could not read back, and the next mutation
+// serialized the file without them. Silent data loss, not a cosmetic gap.
+
+const HYPHENATED = `---
+next_id: 44
+pattern: "ISS-###"
+---
+# T
+
+## Issues
+
+- [ ] ISS-042: Parser drops trailing detail lines. blocked-by:ISS-041 @matt #bug
+      A note line.
+
+- [ ] ISS-041: Land the tokenizer rewrite.
+
+## Completed
+
+- [x] ISS-039: Pin the detail-line grammar. (2026-01-10)
+
+## Deferred
+
+## Won't Fix
+`;
+
+describe('T10 prefixed id patterns round-trip, hyphens included', () => {
+	it('parses every id its own formatId can write', () => {
+		for (const pattern of ['###', 'M##', 'BZ###', 'ISS-###', 'proj_##']) {
+			const id = formatId(7, pattern);
+			const text = `---\nnext_id: 8\npattern: "${pattern}"\n---\n# T\n\n## Issues\n\n- [ ] ${id}: A title.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+			const doc = parse(text);
+			expect(findIssue(doc, id), `${pattern} → ${id} did not parse`).toBeTruthy();
+			expect(serialize(doc)).toBe(text); // and round-trips byte-for-byte
+		}
+	});
+
+	it('round-trips a hyphenated file byte-for-byte', () => {
+		expect(serialize(parse(HYPHENATED))).toBe(HYPHENATED);
+	});
+
+	it('add → read → add no longer destroys the first issue', () => {
+		const empty = `---\nnext_id: 42\npattern: "ISS-###"\n---\n# T\n\n## Issues\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const afterFirst = run(empty, ['add', 'First issue']).text;
+		expect(run(afterFirst, ['list']).output).toContain('ISS-042');
+		const afterSecond = run(afterFirst, ['add', 'Second issue']).text;
+		expect(afterSecond).toContain('ISS-042: First issue'); // survived the rewrite
+		expect(afterSecond).toContain('ISS-043: Second issue');
+	});
+
+	it('resolves relationships and ids through the hyphen', () => {
+		const doc = parse(HYPHENATED);
+		expect(normalizeId('ISS-42', doc.pattern)).toBe('ISS-042');
+		expect(normalizeId('42', doc.pattern)).toBe('ISS-042'); // still forgiving on input
+		expect(isBlocked(doc, findIssue(doc, 'ISS-042')!.issue)).toBe(true);
+		expect(run(HYPHENATED, ['show', 'ISS-042']).output).toContain(
+			'blocked-by: ISS-041 (Land the tokenizer rewrite.) — Open'
+		);
+	});
+
+	it('an id still needs a letter before the hyphen — `-42` is not an id', () => {
+		const odd = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] -42: Not an id.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(parse(odd).sections.get('Issues')).toHaveLength(0);
+		// and `doctor` says so rather than dropping it silently
+		expect(doctorFindings(parse(odd), odd).some((f) => /malformed line/.test(f))).toBe(true);
+	});
+
+	it('does not absorb a hand-written checklist item as an issue', () => {
+		// The dangerous direction: `parse` normalizes every id it reads to the document's
+		// pattern, so absorbing `TODO-1` under `###` would rewrite it to `001`, collide
+		// with the real 001, break the round-trip on write, and aim `done 001` at the
+		// wrong issue — while `doctor` reported the file clean.
+		const prose = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Real issue.\n\n- [ ] TODO-1: buy milk\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const doc = parse(prose);
+		expect(doc.sections.get('Issues')!.map((i) => i.id)).toEqual(['001']);
+		expect(doctorFindings(doc, prose).some((f) => /malformed line/.test(f))).toBe(true);
+	});
+
+	it('a foreign prefix stays malformed even when it looks like an id', () => {
+		for (const line of ['- [ ] TODO-1: x', '- [ ] Fix-123: x', '- [ ] ABC_9: x']) {
+			const text = `---\nnext_id: 2\npattern: "ISS-###"\n---\n# T\n\n## Issues\n\n${line}\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+			expect(parse(text).sections.get('Issues'), line).toHaveLength(0);
+		}
+	});
+
+	it('bare ids still migrate into a newly-adopted prefix', () => {
+		// A `###` file that switches to `ISS-###` keeps reading its existing ids and
+		// renumbers them on the next write — the one lenient case worth keeping.
+		const migrating = `---\nnext_id: 3\npattern: "ISS-###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Written before the prefix.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const doc = parse(migrating);
+		expect(findIssue(doc, '001')!.issue.id).toBe('ISS-001');
+		expect(serialize(doc)).toContain('- [ ] ISS-001: Written before the prefix.');
+	});
+
+	it('the prefix match is case-insensitive, as id input has always been', () => {
+		const lower = `---\nnext_id: 2\npattern: "ISS-###"\n---\n# T\n\n## Issues\n\n- [ ] iss-001: Hand-typed.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(findIssue(parse(lower), 'ISS-001')).toBeTruthy();
+	});
+
+	it('doctor flags an unparseable id line — the damage is at least detectable', () => {
+		const broken = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] no-digits: Bad.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(doctorFindings(parse(broken), broken).some((f) => /malformed line/.test(f))).toBe(true);
+	});
+});

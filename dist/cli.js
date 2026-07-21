@@ -14,7 +14,12 @@ var CHECKED_SECTIONS = new Set([DONE_SECTION]);
 var DETAIL_INDENT = "      ";
 var DEFAULT_PATTERN = "###";
 var SUPPORTED_SCHEMA = 1;
-var ISSUE_RE = /^- \[([ xX])\] ([A-Za-z]*[0-9]+): (.*)$/;
+function issueLineRe(pattern) {
+  const prefix = pattern.replace(/#+$/, "");
+  const esc = prefix.replace(/[.*+?^${}()|[\]\\-]/g, "\\$&");
+  const id = esc ? `(?:${esc})?[0-9]+` : "[0-9]+";
+  return new RegExp(`^- \\[([ xX])\\] (${id}): (.*)$`, "i");
+}
 var DATE_SUFFIX_RE = /^(.*?) \((\d{4}-\d{2}-\d{2})\)$/;
 var FIELD_RE = /^([A-Za-z][A-Za-z0-9_-]*):(\S+)$/;
 var ASSIGNEE_RE = /^@(\S+)$/;
@@ -59,6 +64,7 @@ function parse(text) {
   }
   const preamble = trimBlankEdges(lines.slice(i, firstSection)).join(`
 `);
+  const issueRe = issueLineRe(pattern);
   const sections = new Map;
   for (const name of SECTION_ORDER)
     sections.set(name, []);
@@ -77,7 +83,7 @@ function parse(text) {
     }
     if (current === null || line.trim() === "")
       continue;
-    const m = line.match(ISSUE_RE);
+    const m = line.match(issueRe);
     if (m) {
       lastIssue = toIssue(m[1] !== " ", m[2] ?? "", m[3] ?? "", pattern);
       current.push(lastIssue);
@@ -905,10 +911,11 @@ function doctorFindings(doc, text) {
       if (issue.status && !declared.has(issue.status))
         out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
   }
-  out.push(...malformedLines(text));
+  out.push(...malformedLines(text, doc.pattern));
   return out;
 }
-function malformedLines(text) {
+function malformedLines(text, pattern) {
+  const issueRe = issueLineRe(pattern);
   const out = [];
   let inSection = false;
   for (const line of text.split(`
@@ -919,7 +926,7 @@ function malformedLines(text) {
     }
     if (!inSection || line.trim() === "")
       continue;
-    if (ISSUE_RE.test(line) || /^\s+/.test(line))
+    if (issueRe.test(line) || /^\s+/.test(line))
       continue;
     out.push(`malformed line (not an issue or note): ${line.trim()}`);
   }

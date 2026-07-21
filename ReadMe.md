@@ -69,8 +69,10 @@ How it's read:
 - **Frontmatter** (optional, fenced by `---`):
   - `next_id` — the number the next `add` will use; the CLI bumps it for you.
   - `pattern` — the ID shape. `#` runs are zero-padded to their width and may
-    carry a prefix: `M##` → `M01`, `BZ###` → `BZ007`, or just `###` → `007`.
-    If there's no frontmatter, the default pattern is the generic `###`.
+    carry a prefix: `M##` → `M01`, `BZ###` → `BZ007`, `ISS-###` → `ISS-042`, or
+    just `###` → `007`. If there's no frontmatter, the default is the generic
+    `###`. A file is read with *its own* pattern, so a line whose id carries some
+    other prefix is a malformed line, not an issue — `doctor` reports it.
 - **Four fixed sections**, always in this order: `## Issues` (open), `##
   Completed`, `## Deferred`, `## Won't Fix`. `Completed` items render checked
   (`[x]`); the rest stay `[ ]`.
