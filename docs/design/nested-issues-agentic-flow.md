@@ -1,8 +1,13 @@
 # Design spec — Nested issues & agentic-flow support
 
-**Status:** Locked. Every design decision below is settled; a build session can
-execute this document with no open questions. No production code ships in the
-effort that produced it — this spec + its ADRs *are* the deliverable.
+**Status:** **Implemented** — built in `d30185b..aa85602`, shipped in `0.2.0`. The
+design is locked and this document remains the normative reference for behaviour;
+§9.1 records the four deviations found when the checklist was verified against the
+code.
+
+*Written as:* **Locked** — the effort that produced this spec shipped no production
+code; the spec + its ADRs were the deliverable, and §9 was the handoff to a separate
+build session.
 
 **Scope.** How `@elucidata/issues` grows to support **nested issues** and the
 **agentic dev flow** (blocking, parent/child nesting, claim/assignee, labels,
@@ -479,21 +484,74 @@ blank-separated-with-detail round-trips exactly.
 
 The design is closed; this is a suggested implementation order, not new decisions.
 
-1. **Parser** — peel trailing `key:value` fields and `@`/`#` sigils off the issue
-   line into the model; preserve unknown keys (UDA); `part-of:` single, `blocked-by:`
-   /`#label` multi (§1).
-2. **Serializer** — re-emit fields on the tail deterministically; **`renderSection`
-   join `\n\n`** (§7.1). Migrate `ISSUES.md` + fixtures; keep `serialize(parse(x))`
-   green under the restated invariant (§7.2–7.3).
-3. **Derivation** (read-time, pure) — `isOpen`, `blocked`, cycle/dangling/self-ref
-   detection with warnings, `takeable`, frontier + empty-diagnosis (§3–§4).
-4. **CLI verbs & flags** — `block`/`unblock`, `assign`/`unassign`, `label`/`unlabel`,
-   `set`/`unset`, `add` field flags, `next`/`ready`, `list`/`show`/`tree`, `doctor`,
-   `--json`, `-q`; wire warnings → stderr, exit codes per decision 10/19 (§5).
-5. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `docs/agents/*`
-   to teach the new surface (tracked as fog on the map; downstream of this spec).
-6. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run `dist/`
-   straight from GitHub.
+- [x] 1. **Parser** — peel trailing `key:value` fields and `@`/`#` sigils off the
+      issue line into the model; preserve unknown keys (UDA); `part-of:` single,
+      `blocked-by:`/`#label` multi (§1). — `c8607df` (T2)
+- [x] 2. **Serializer** — re-emit fields on the tail deterministically;
+      **`renderSection` join `\n\n`** (§7.1). Migrate `ISSUES.md` + fixtures; keep
+      `serialize(parse(x))` green under the restated invariant (§7.2–7.3). —
+      `d30185b` (T0). *Fixtures migrated; the `ISSUES.md` half never applied — see
+      §9.1.*
+- [x] 3. **Derivation** (read-time, pure) — `isOpen`, `blocked`,
+      cycle/dangling/self-ref detection with warnings, `takeable`, frontier +
+      empty-diagnosis (§3–§4). — `1a4649e` (T3)
+- [x] 4. **CLI verbs & flags** — `block`/`unblock`, `assign`/`unassign`,
+      `label`/`unlabel`, `set`/`unset`, `add` field flags, `next`/`ready`,
+      `list`/`show`/`tree`, `doctor`, `--json`, `-q`; wire warnings → stderr, exit
+      codes per decision 10/19 (§5). — `aa85602` (T4)
+- [x] 5. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and
+      `docs/agents/*` to teach the new surface (tracked as fog on the map;
+      downstream of this spec). — `aa85602`
+- [x] 6. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run
+      `dist/` straight from GitHub. — verified current: `bun run build` leaves
+      `dist/` unchanged.
+- [x] 7. **Mark this spec `Implemented`** in the header and tick this checklist,
+      recording deviations in §9.1. *(Added retroactively — see §9.1's closing
+      note.)*
+
+### 9.1 Implementation notes (verified 2026-07-20 against `src/`)
+
+All 19 of §5.2's numbered decisions and all six original checklist items are
+implemented. Four deviations were found on verification. **None was re-litigated
+here** — they are recorded as facts about the code, and any fix is a fresh ticket.
+
+- **Decision 2 — byte-identity holds, with one input class excepted.** `add` field
+  flags do produce byte-identical output to the verb sequence (tested,
+  `src/index.test.ts`), because `renderIssue` emits a fixed canonical tail order. But
+  `firstStr` (`src/index.ts:1254`) comma-splits and takes `[0]`, so
+  `add X --assignee a,b` writes `@a` while `assign X "a,b"` writes `@a,b`. Same
+  silent truncation on `--part-of` and `--status`.
+- **Decisions 2 & 7 — the declared-status warning is `set`-only.** `add --status
+  <undeclared>` writes silently; the `add` arm (`src/index.ts:1388`) calls `cmdAdd`
+  directly and returns only `edgeAdvisories`, never reaching `cmdSet`'s check. So the
+  `add` flags map 1:1 onto the verbs' *output*, not onto "the verb logic" as decision
+  2 words it. `doctor` still catches it after the fact.
+- **Decision 8 — write-time edge advisories do not fire on `set`.** The spec names
+  `block`/`set`; the `set` arm (`src/index.ts:1427`) returns only `cmdSet`'s status
+  warnings, so `set <id> blocked-by:999` writes a dangling edge with no advisory.
+  `add` and `block` do fire them.
+- **Decision 19 — `doctor` output is flat, not grouped.** Findings are ordered by
+  category but carry no group headings.
+
+Two spec claims are **not verifiable from the code** and were not counted either way:
+decision 9's "stable machine contract" (stability is a cross-release property — field
+names are fixed and tested, but nothing pins them against drift), and the rationale
+clauses in decisions 2 and 16.
+
+The implementation also went **beyond** the spec in four places: `set` accepts the
+relational keys as replace-semantics escape hatches, `doctor` gained `--json`, the
+tree renderer carries a `part-of` cycle guard, and ADR 0007's compat advisory channel
+was threaded in ahead of the §3 advisories.
+
+**On §7.3.** The spec called migrating "the repo's own `ISSUES.md` and every
+single-`\n` test fixture" the sole residual build risk. The fixture half was real and
+was done (17 blank-separated fixtures). The `ISSUES.md` half was moot: this repo has
+never had one — its issues live in GitHub Issues per `CLAUDE.md`.
+
+**On item 7.** Items 1–6 were completed by the build session, which did not update
+this document — so between `aa85602` and this note the spec read `Locked` while being
+fully implemented, with no way for a reader to tell. Item 7 exists to make the
+write-back part of the build rather than a convention someone has to remember.
 
 ---
 

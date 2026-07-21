@@ -1,9 +1,13 @@
 # Design spec — Terminal output: state gutter, colour, `--plain`, read filtering
 
-**Status:** Locked. Every design decision below is settled; a build session can
-execute this document with no open questions. No production code shipped in the
-effort that produced it — this spec + [ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md)
-*are* the deliverable.
+**Status:** **Locked — not yet implemented.** Every design decision below is settled
+and a build session can execute this document with no open questions, but no code has
+been written against it. §9's checklist is unticked; the last item is to flip this
+line to **Implemented** and tick the rest.
+
+No production code shipped in the effort that produced this spec — the spec +
+[ADR 0008](../adr/0008-terminal-output-state-gutter-colour-plain.md) *are* the
+deliverable.
 
 **Scope.** How the **human-readable** read surface of `@elucidata/issues` renders
 state: a leading state glyph on compact rows, terminal colour, a `--plain` escape
@@ -405,28 +409,39 @@ protection.
 ## 9. Build checklist (execution order for the next session)
 
 The design is closed; this is a suggested implementation order, not new decisions.
+Tick each box as it lands, with the commit that carried it.
 
-1. **Shell** (`src/bin.ts`) — parse `--plain` / `--color` / `--no-color`; resolve
-   `{ color, plain }` per §6.1; thread it into every read command.
-2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1 precedence), the
-   glyph table, an ANSI helper gated on the `color` boolean (§2).
-3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter + element
-   colours; drop the section tags in glyph mode; restore them as `--plain` postfix
-   tags with the casing rule (§5.2).
-4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
-   implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
-5. **`show`** — one-line header; the `state:` field with suppression-when-closed;
-   confined state colour; capitalized relationship suffixes and `Issues` → `Open`
-   (§4).
-6. **Tests** — the four `{color, plain}` combinations across each read command; the
-   precedence table; closed-and-blocked suppression on `show` and co-occurrence under
-   `--plain`; a filtered `tree` with scaffolding in both modes.
-7. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `README` to teach
-   the new flags and the glyph vocabulary; state §7's posture where `--json` is
-   documented (§9.1).
-8. **Version** — bump `package.json` to `0.3.0`.
-9. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run `dist/`
-   straight from GitHub.
+- [ ] 1. **Shell** (`src/bin.ts`) — parse `--plain` / `--color` / `--no-color`;
+      resolve `{ color, plain }` per §6.1; thread it into every read command.
+- [ ] 2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1
+      precedence), the glyph table, an ANSI helper gated on the `color` boolean (§2).
+- [ ] 3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter +
+      element colours; drop the section tags in glyph mode; restore them as `--plain`
+      postfix tags with the casing rule (§5.2).
+- [ ] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
+      implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
+- [ ] 5. **`show`** — one-line header; the `state:` field with
+      suppression-when-closed; confined state colour; capitalized relationship
+      suffixes and `Issues` → `Open` (§4).
+- [ ] 6. **Tests** — the four `{color, plain}` combinations across each read command;
+      the precedence table; closed-and-blocked suppression on `show` and
+      co-occurrence under `--plain`; a filtered `tree` with scaffolding in both modes.
+- [ ] 7. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `README` to
+      teach the new flags and the glyph vocabulary; state §7's posture where `--json`
+      is documented (§9.1).
+- [ ] 8. **Version** — bump `package.json` to `0.3.0`.
+- [ ] 9. **Rebuild & commit `dist/`** per repo policy (CLAUDE.md) — consumers run
+      `dist/` straight from GitHub.
+- [ ] 10. **Mark this spec `Implemented`** — flip the header's Status line, tick this
+      checklist with commit refs, and record any deviations from the spec as an
+      **Implementation notes** subsection here.
+
+Item 10 is not ceremony. Its predecessor spec
+([`nested-issues-agentic-flow.md`](nested-issues-agentic-flow.md)) was fully built and
+still read `Locked` afterward, with nothing in the document to tell a reader it had
+shipped — because nothing in the document asked to be updated. Record deviations
+rather than silently correcting the spec to match the code; the gap between the two is
+the useful information.
 
 ### 9.1 Doc surface — what each one owes
 
