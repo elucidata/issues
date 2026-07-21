@@ -632,12 +632,18 @@ const CLOSED_STATES: Partial<Record<SectionName, IssueState>> = {
  * (§4.2) depends on it reading exactly this way.
  */
 export function issueState(doc: Doc, issue: Issue, section?: SectionName): IssueState {
-	const name = section ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
-	const closed = CLOSED_STATES[name];
+	const closed = CLOSED_STATES[sectionOf(doc, issue, section)];
 	if (closed) return closed;
 	if (isBlocked(doc, issue)) return 'blocked';
 	if (issue.assignee) return 'claimed';
 	return 'open';
+}
+
+// The section an issue lives in: the caller's answer when it already has one (every
+// read but `tree` does), otherwise a lookup. An issue that is somehow not in the file
+// reads as open — the same fail-open posture the graph derivations take (§3.4).
+function sectionOf(doc: Doc, issue: Issue, known?: SectionName): SectionName {
+	return known ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
 }
 
 /** The gutter glyph and its colour, per state (§1). `null` = uncoloured. */
@@ -705,7 +711,8 @@ export function cmdShow(
 	opts: ShowOptions = {},
 	render: RenderOptions = DEFAULT_RENDER
 ): string {
-	void render; // §6 plumbing — the dossier migrates onto it in a later slice (§9.5)
+	// The dossier itself is redesigned in its own slice (§9.5); here `render` reaches
+	// only the child rows, which share the compact-row renderer (§1.1).
 	const { section, issue } = requireIssue(doc, idInput);
 	const mark = issue.checked ? ' [x]' : '';
 	const date = issue.date ? ` (${issue.date})` : '';
@@ -722,7 +729,7 @@ export function cmdShow(
 		const kids = childrenOf(doc, issue.id);
 		if (kids.length) {
 			lines.push('  children:');
-			for (const k of kids) lines.push(...treeLines(doc, k, 2));
+			for (const k of kids) lines.push(...treeLines(doc, k, 2, render));
 		}
 	}
 	if (!opts.quiet) for (const w of warningsFor(doc, issue.id)) lines.push(`  ! ${w}`);
@@ -749,21 +756,74 @@ export interface ListOptions {
 
 // The compact info-dense markers that ride an issue on the triage surface (§5
 // decision 17): `status:`, `@assignee`, `#labels`. A metadata-free issue adds none.
-function markers(issue: Issue): string {
+// Element-typed, per §2: the same field is the same colour on every row, so the eye
+// learns fixed columns. The `status:` key stays default — only its value is yellow.
+function markers(issue: Issue, color: boolean): string {
 	let s = '';
-	if (issue.status) s += ` status:${issue.status}`;
-	if (issue.assignee) s += ` @${issue.assignee}`;
-	for (const l of issue.labels) s += ` #${l}`;
+	if (issue.status) s += ` status:${paint(issue.status, 'yellow', color)}`;
+	if (issue.assignee) s += ` ${paint('@' + issue.assignee, 'magenta', color)}`;
+	for (const l of issue.labels) s += ` ${paint('#' + l, 'blue', color)}`;
 	return s;
 }
 
-// One compact line for `list` (§5 decision 17): `⊘` when blocked, then the id, title,
-// the info-dense markers, an optional datestamp, and `…` when a note is attached.
-function listRow(doc: Doc, it: Issue): string {
-	const flag = isBlocked(doc, it) ? '⊘ ' : '';
-	const date = it.date ? ` (${it.date})` : '';
-	const more = it.detail.length ? ' …' : '';
-	return `  ${flag}${it.id}  ${it.title}${markers(it)}${date}${more}`;
+// What a given read puts on a row besides the gutter, id and title. Each command
+// keeps its own answer (`ready` stays sparse, `tree` carries no datestamp); the
+// gutter, the element colours and the `--plain` tags are what they now share.
+interface RowFields {
+	indent: string;
+	section?: SectionName; // known by the caller on most paths; looked up otherwise
+	markers?: boolean;
+	date?: boolean;
+	note?: boolean; // the ` …` "has a note" ellipsis
+}
+
+/**
+ * The one compact-row renderer behind `list`, `next`, `ready`, `tree` and
+ * `show --children` (§1.1). Two renderings, chosen by `--plain`:
+ *
+ *   glyph mode   `indent + glyph + id + title + markers` — the gutter is the state
+ *                channel (glyph *and* colour, §1); everything right of it is
+ *                element-typed (§2). The section tags are gone: the gutter carries
+ *                the section now.
+ *   `--plain`    `indent + id + title + markers + [tags]` (§5.1) — no colour, no
+ *                gutter, state as postfix tags at the *end* so the leading columns
+ *                stay parseable and `list` and `tree` agree.
+ *
+ * `--plain` is the strongest presentation flag (§5.4.1), so it forces colour off
+ * here rather than trusting the caller to have resolved it that way.
+ */
+function compactRow(doc: Doc, issue: Issue, fields: RowFields, render: RenderOptions): string {
+	const color = render.color && !render.plain;
+	const section = sectionOf(doc, issue, fields.section);
+	const tail =
+		(fields.markers ? markers(issue, color) : '') +
+		(fields.date && issue.date ? ` (${issue.date})` : '') +
+		(fields.note && issue.detail.length ? ' …' : '');
+	if (render.plain) {
+		return `${fields.indent}${issue.id}  ${issue.title}${tail}${plainTags(doc, issue, section)}`;
+	}
+	const { glyph, color: gutter } = STATE_GLYPHS[issueState(doc, issue, section)];
+	// The title dims when the issue is closed (§2) — de-emphasis, never a state claim.
+	const title = section === OPEN_SECTION ? issue.title : paint(issue.title, 'dim', color);
+	const id = paint(issue.id, 'cyan', color);
+	return `${fields.indent}${paint(glyph, gutter, color)} ${id}  ${title}${tail}`;
+}
+
+/**
+ * The `--plain` postfix state tags (§5.2). **Capitalized = stored** (the physical
+ * section), **lowercase = derived** (`blocked`, computed from `blocked-by:` at read
+ * time) — this mirrors ADR 0003 in the rendering itself and is load-bearing, so do
+ * not normalize the casing.
+ *
+ * A closed *and* blocked row shows **both** tags: `--plain` has room the single-slot
+ * gutter does not, so §1's precedence does not apply here. Claimed needs no tag —
+ * `@who` already carries it.
+ */
+function plainTags(doc: Doc, issue: Issue, section: SectionName): string {
+	let s = '';
+	if (section !== OPEN_SECTION) s += ` [${section}]`;
+	if (isBlocked(doc, issue)) s += ' [blocked]';
+	return s;
 }
 
 // Does an issue pass the §4.4 status/label/parent filters? (AND across dimensions,
@@ -806,14 +866,20 @@ export function cmdList(
 	filters: FrontierFilters = {},
 	render: RenderOptions = DEFAULT_RENDER
 ): string {
-	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const names = listSections(opts);
 	const blocks: string[] = [];
 	for (const name of names) {
 		const issues = (doc.sections.get(name) ?? []).filter((it) => listFilter(doc, it, filters));
 		if (!issues.length) continue;
 		const header = names.length > 1 ? `${name}:` : '';
-		const rows = issues.map((it) => listRow(doc, it));
+		const rows = issues.map((it) =>
+			compactRow(
+				doc,
+				it,
+				{ indent: '  ', section: name, markers: true, date: true, note: true },
+				render
+			)
+		);
 		blocks.push((header ? header + '\n' : '') + rows.join('\n'));
 	}
 	if (!blocks.length) return 'No issues.';
@@ -1019,9 +1085,12 @@ export function isTakeable(doc: Doc, issue: Issue, section: SectionName): boolea
 	return section === OPEN_SECTION && !issue.assignee && !isBlocked(doc, issue);
 }
 
-function frontierRow(it: Issue): string {
-	const more = it.detail.length ? ' …' : '';
-	return `  ${it.id}  ${it.title}${more}`;
+// The frontier stays sparse — no markers, no datestamp (§4.2): every row is open and
+// unclaimed by construction, so the columns that would carry state are the ones it has
+// nothing to say about. It still renders through the shared row (§1.1), for the gutter
+// and the element colours.
+function frontierRow(doc: Doc, it: Issue, render: RenderOptions): string {
+	return compactRow(doc, it, { indent: '  ', note: true }, render);
 }
 
 /** `ready` — the whole ordered takeable frontier (§4.2); empty is diagnosed (§4.5). */
@@ -1030,10 +1099,9 @@ export function cmdReady(
 	filters: FrontierFilters = {},
 	render: RenderOptions = DEFAULT_RENDER
 ): string {
-	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const items = frontier(doc, filters);
 	if (!items.length) return diagnoseEmpty(doc, filters);
-	return items.map(frontierRow).join('\n');
+	return items.map((it) => frontierRow(doc, it, render)).join('\n');
 }
 
 /** `next` — the topmost takeable issue (`ready[0]`), or the same empty-diagnosis. */
@@ -1042,9 +1110,8 @@ export function cmdNext(
 	filters: FrontierFilters = {},
 	render: RenderOptions = DEFAULT_RENDER
 ): string {
-	void render; // §6 plumbing — compact rows migrate onto it in a later slice (§9.3)
 	const top = frontier(doc, { ...filters, limit: undefined })[0];
-	return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
+	return top ? frontierRow(doc, top, render) : diagnoseEmpty(doc, filters);
 }
 
 // An empty frontier is a normal, diagnosed state — never an error (§4.5). When any
@@ -1126,33 +1193,38 @@ function rootsOf(doc: Doc): Issue[] {
 		.map((e) => e.issue);
 }
 
-// One issue's forest lines: `⊘`-annotated when blocked (never drawn as structure —
-// §5 decision 13), tagged with its section when closed, then its subtree indented.
-// `seen` guards a pathological `part-of:` cycle from recursing forever.
-function treeLines(doc: Doc, issue: Issue, depth: number, seen = new Set<string>()): string[] {
+// One issue's forest lines: the shared compact row (§1.1 — gutter and colour, or the
+// `--plain` postfix tags), then its subtree indented. Blocking stays a node annotation,
+// never drawn as structure (§5 decision 13). `seen` guards a pathological `part-of:`
+// cycle from recursing forever — that guard's line is the one row in the forest that
+// does not go through `compactRow`, because it stands in for a row rather than being one.
+function treeLines(
+	doc: Doc,
+	issue: Issue,
+	depth: number,
+	render: RenderOptions,
+	seen = new Set<string>()
+): string[] {
 	const indent = '  '.repeat(depth + 1);
 	if (seen.has(issue.id)) return [`${indent}${issue.id} (part-of cycle)`];
 	seen.add(issue.id);
-	const flag = isBlocked(doc, issue) ? '⊘ ' : '';
-	const found = findIssue(doc, issue.id);
-	const tag = found && found.section !== OPEN_SECTION ? ` [${found.section}]` : '';
-	const out = [`${indent}${flag}${issue.id}  ${issue.title}${markers(issue)}${tag}`];
-	for (const k of childrenOf(doc, issue.id)) out.push(...treeLines(doc, k, depth + 1, seen));
+	const out = [compactRow(doc, issue, { indent, markers: true }, render)];
+	for (const k of childrenOf(doc, issue.id)) out.push(...treeLines(doc, k, depth + 1, render, seen));
 	return out;
 }
 
 /**
  * `tree` — the containment-only forest (§5 decision 13), state-annotated. Roots are
  * issues with no valid parent (top-level or dangling `part-of:`); children nest by
- * `part-of:`. Blocking is a node annotation (`⊘`), never tree structure.
+ * `part-of:`. Blocking is carried by the row's state gutter (or a `[blocked]` tag under
+ * `--plain`), never by tree structure.
  */
 export function cmdTree(doc: Doc, render: RenderOptions = DEFAULT_RENDER): string {
-	void render; // §6 plumbing — the forest migrates onto it in a later slice (§9.3/§9.4)
 	const roots = rootsOf(doc);
 	if (!roots.length) return 'No issues.';
 	const seen = new Set<string>();
 	const lines: string[] = [];
-	for (const r of roots) lines.push(...treeLines(doc, r, 0, seen));
+	for (const r of roots) lines.push(...treeLines(doc, r, 0, render, seen));
 	return lines.join('\n');
 }
 
@@ -1395,7 +1467,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest (⊘ = blocked)
+  tree                                                   containment forest
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -1411,7 +1483,14 @@ Mutations:
   version, --version                                     print the installed version
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
-         (AND across dimensions, OR within a repeated/comma-listed dimension)`;
+         (AND across dimensions, OR within a repeated/comma-listed dimension)
+
+presentation (human-readable reads only; --json is never colourized):
+  --plain      no colour, no state gutter — state as postfix [tags] at the row's end
+  --color      force colour on;  --no-color  force it off (keeping the gutter)
+               colour otherwise follows NO_COLOR and whether stdout is a terminal
+
+state gutter:  - open   ~ claimed   ⊘ blocked   ✓ completed   » deferred   × won't fix`;
 
 export interface RunResult {
 	text: string; // resulting file contents (unchanged unless `mutated`)

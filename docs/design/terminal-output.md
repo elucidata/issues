@@ -418,9 +418,10 @@ Tick each box as it lands, with the commit that carried it.
 - [x] 2. **Rendering primitives** (`src/index.ts`) — the state resolver (§1
       precedence), the glyph table, an ANSI helper gated on the `color` boolean (§2).
       ([#27](https://github.com/elucidata/issues/issues/27))
-- [ ] 3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter +
+- [x] 3. **Compact rows** — `cmdList`, `treeLines`, `next` / `ready`: gutter +
       element colours; drop the section tags in glyph mode; restore them as `--plain`
       postfix tags with the casing rule (§5.2).
+      ([#28](https://github.com/elucidata/issues/issues/28))
 - [ ] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
       implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
 - [ ] 5. **`show`** — one-line header; the `state:` field with
@@ -463,6 +464,20 @@ Recorded as they land, per item 10.
 - **`doctor` does not take the render options** (item 1, #27). §1.1 scopes the state
   vocabulary to `list` / `tree` / `next` / `ready` / `show`; `doctor` emits findings,
   not compact rows, and no section of this spec gives it anything to render.
+- **`next` / `ready` rows stay sparse** (item 3, #28). They render through the shared
+  row for gutter and colour, but keep today's field selection — no `status:`/`@`/`#`
+  markers, no datestamp. Every frontier row is open and unclaimed by construction, so
+  the columns §5.1 lists are the ones it has nothing to say about. Giving them markers
+  is a visible change no acceptance criterion asked for; it can land later without
+  disturbing anything.
+- **The `part-of` cycle guard line does not go through `compactRow`** (item 3, #28).
+  `treeLines` emits `id (part-of cycle)` in place of a row it refuses to recurse into,
+  so it gets no gutter, no colour and no tags. It stands in *for* a row rather than
+  being one — the one hole in §1.1's "every compact row".
+- **`--help` and `skills/issues/SKILL.md` were updated early** (item 7, partial, #28).
+  Item 7 is a later slice, but #28 is where the three flags first change what a user
+  sees, and CLAUDE.md requires the skill to track the CLI surface. Still owed by item
+  7: the README, and `--all` on `tree` once §3's default flip lands.
 
 ### 9.1 Doc surface — what each one owes
 

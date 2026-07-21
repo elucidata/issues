@@ -456,8 +456,7 @@ var CLOSED_STATES = {
   [WONTFIX_SECTION]: "wontfix"
 };
 function issueState(doc, issue, section) {
-  const name = section ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
-  const closed = CLOSED_STATES[name];
+  const closed = CLOSED_STATES[sectionOf(doc, issue, section)];
   if (closed)
     return closed;
   if (isBlocked(doc, issue))
@@ -465,6 +464,9 @@ function issueState(doc, issue, section) {
   if (issue.assignee)
     return "claimed";
   return "open";
+}
+function sectionOf(doc, issue, known) {
+  return known ?? findIssue(doc, issue.id)?.section ?? OPEN_SECTION;
 }
 var STATE_GLYPHS = {
   open: { glyph: "-", color: null },
@@ -519,7 +521,7 @@ function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
     if (kids.length) {
       lines.push("  children:");
       for (const k of kids)
-        lines.push(...treeLines(doc, k, 2));
+        lines.push(...treeLines(doc, k, 2, render));
     }
   }
   if (!opts.quiet)
@@ -538,21 +540,35 @@ function resolveRef(doc, rawId, selfId) {
   const state = found.section === OPEN_SECTION ? "open" : found.section.toLowerCase();
   return `${id} (${found.issue.title}) — ${state}`;
 }
-function markers(issue) {
+function markers(issue, color) {
   let s = "";
   if (issue.status)
-    s += ` status:${issue.status}`;
+    s += ` status:${paint(issue.status, "yellow", color)}`;
   if (issue.assignee)
-    s += ` @${issue.assignee}`;
+    s += ` ${paint("@" + issue.assignee, "magenta", color)}`;
   for (const l of issue.labels)
-    s += ` #${l}`;
+    s += ` ${paint("#" + l, "blue", color)}`;
   return s;
 }
-function listRow(doc, it) {
-  const flag = isBlocked(doc, it) ? "⊘ " : "";
-  const date = it.date ? ` (${it.date})` : "";
-  const more = it.detail.length ? " …" : "";
-  return `  ${flag}${it.id}  ${it.title}${markers(it)}${date}${more}`;
+function compactRow(doc, issue, fields, render) {
+  const color = render.color && !render.plain;
+  const section = sectionOf(doc, issue, fields.section);
+  const tail = (fields.markers ? markers(issue, color) : "") + (fields.date && issue.date ? ` (${issue.date})` : "") + (fields.note && issue.detail.length ? " …" : "");
+  if (render.plain) {
+    return `${fields.indent}${issue.id}  ${issue.title}${tail}${plainTags(doc, issue, section)}`;
+  }
+  const { glyph, color: gutter } = STATE_GLYPHS[issueState(doc, issue, section)];
+  const title = section === OPEN_SECTION ? issue.title : paint(issue.title, "dim", color);
+  const id = paint(issue.id, "cyan", color);
+  return `${fields.indent}${paint(glyph, gutter, color)} ${id}  ${title}${tail}`;
+}
+function plainTags(doc, issue, section) {
+  let s = "";
+  if (section !== OPEN_SECTION)
+    s += ` [${section}]`;
+  if (isBlocked(doc, issue))
+    s += " [blocked]";
+  return s;
 }
 function passesFilters(doc, it, filters) {
   if (filters.status?.length && (!it.status || !filters.status.includes(it.status)))
@@ -594,7 +610,7 @@ function cmdList(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
     if (!issues.length)
       continue;
     const header = names.length > 1 ? `${name}:` : "";
-    const rows = issues.map((it) => listRow(doc, it));
+    const rows = issues.map((it) => compactRow(doc, it, { indent: "  ", section: name, markers: true, date: true, note: true }, render));
     blocks.push((header ? header + `
 ` : "") + rows.join(`
 `));
@@ -737,20 +753,19 @@ function frontier(doc, filters = {}) {
 function isTakeable(doc, issue, section) {
   return section === OPEN_SECTION && !issue.assignee && !isBlocked(doc, issue);
 }
-function frontierRow(it) {
-  const more = it.detail.length ? " …" : "";
-  return `  ${it.id}  ${it.title}${more}`;
+function frontierRow(doc, it, render) {
+  return compactRow(doc, it, { indent: "  ", note: true }, render);
 }
 function cmdReady(doc, filters = {}, render = DEFAULT_RENDER) {
   const items = frontier(doc, filters);
   if (!items.length)
     return diagnoseEmpty(doc, filters);
-  return items.map(frontierRow).join(`
+  return items.map((it) => frontierRow(doc, it, render)).join(`
 `);
 }
 function cmdNext(doc, filters = {}, render = DEFAULT_RENDER) {
   const top = frontier(doc, { ...filters, limit: undefined })[0];
-  return top ? frontierRow(top) : diagnoseEmpty(doc, filters);
+  return top ? frontierRow(doc, top, render) : diagnoseEmpty(doc, filters);
 }
 function diagnoseEmpty(doc, filters) {
   const open = doc.sections.get(OPEN_SECTION) ?? [];
@@ -805,17 +820,14 @@ function childrenOf(doc, parentId) {
 function rootsOf(doc) {
   return allEntries(doc).filter((e) => !validParentId(doc, e.issue)).map((e) => e.issue);
 }
-function treeLines(doc, issue, depth, seen = new Set) {
+function treeLines(doc, issue, depth, render, seen = new Set) {
   const indent = "  ".repeat(depth + 1);
   if (seen.has(issue.id))
     return [`${indent}${issue.id} (part-of cycle)`];
   seen.add(issue.id);
-  const flag = isBlocked(doc, issue) ? "⊘ " : "";
-  const found = findIssue(doc, issue.id);
-  const tag = found && found.section !== OPEN_SECTION ? ` [${found.section}]` : "";
-  const out = [`${indent}${flag}${issue.id}  ${issue.title}${markers(issue)}${tag}`];
+  const out = [compactRow(doc, issue, { indent, markers: true }, render)];
   for (const k of childrenOf(doc, issue.id))
-    out.push(...treeLines(doc, k, depth + 1, seen));
+    out.push(...treeLines(doc, k, depth + 1, render, seen));
   return out;
 }
 function cmdTree(doc, render = DEFAULT_RENDER) {
@@ -825,7 +837,7 @@ function cmdTree(doc, render = DEFAULT_RENDER) {
   const seen = new Set;
   const lines = [];
   for (const r of roots)
-    lines.push(...treeLines(doc, r, 0, seen));
+    lines.push(...treeLines(doc, r, 0, render, seen));
   return lines.join(`
 `);
 }
@@ -1022,7 +1034,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest (⊘ = blocked)
+  tree                                                   containment forest
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -1038,7 +1050,14 @@ Mutations:
   version, --version                                     print the installed version
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
-         (AND across dimensions, OR within a repeated/comma-listed dimension)`;
+         (AND across dimensions, OR within a repeated/comma-listed dimension)
+
+presentation (human-readable reads only; --json is never colourized):
+  --plain      no colour, no state gutter — state as postfix [tags] at the row's end
+  --color      force colour on;  --no-color  force it off (keeping the gutter)
+               colour otherwise follows NO_COLOR and whether stdout is a terminal
+
+state gutter:  - open   ~ claimed   ⊘ blocked   ✓ completed   » deferred   × won't fix`;
 function result(fields) {
   return { warnings: [], ...fields };
 }

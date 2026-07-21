@@ -216,7 +216,8 @@ export declare function cmdNext(doc: Doc, filters?: FrontierFilters, render?: Re
 /**
  * `tree` — the containment-only forest (§5 decision 13), state-annotated. Roots are
  * issues with no valid parent (top-level or dangling `part-of:`); children nest by
- * `part-of:`. Blocking is a node annotation (`⊘`), never tree structure.
+ * `part-of:`. Blocking is carried by the row's state gutter (or a `[blocked]` tag under
+ * `--plain`), never by tree structure.
  */
 export declare function cmdTree(doc: Doc, render?: RenderOptions): string;
 export declare function doctorFindings(doc: Doc, text: string): string[];

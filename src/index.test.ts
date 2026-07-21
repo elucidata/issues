@@ -1336,14 +1336,9 @@ describe('T5 render options thread through the read path, changing nothing (§6)
 		{ color: true, plain: true }
 	];
 
-	it('every read command accepts the options and is byte-identical in all four combinations', () => {
-		for (const argv of READS) {
-			const baseline = run(T5, argv).output;
-			for (const render of COMBOS) {
-				expect(run(T5, argv, render).output).toBe(baseline);
-			}
-		}
-	});
+	// The byte-identical-in-all-four-combinations guard that lived here was the
+	// expand half's whole point; T6 migrates the renderers onto the options, so the
+	// combinations now differ on purpose. T6 covers each of them explicitly.
 
 	it('the flags parse on every read command without error', () => {
 		for (const argv of READS) {
@@ -1366,9 +1361,222 @@ describe('T5 render options thread through the read path, changing nothing (§6)
 		// Comments name both (they explain the boundary); only real code counts.
 		const src = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
 			.replace(/\/\*[\s\S]*?\*\//g, '')
-			.replace(/\/\/.*$/gm, '');
+			.replace(/\/\/.*$/gm, '')
+			// The help text documents `NO_COLOR` and the flags as prose; exempt it so the
+			// token check below stays a real guard rather than a false positive.
+			.replace(/const HELP = `[\s\S]*?`;/, '');
 		// `today()` is the one sanctioned env read (the ISSUES_DATE test hook).
 		expect([...src.matchAll(/process\.env\.(\w+)/g)].map((m) => m[1])).toEqual(['ISSUES_DATE']);
 		expect(src).not.toMatch(/\bisTTY\b|\bNO_COLOR\b|process\.stdout/);
+	});
+});
+
+// ── T6 — compact rows: gutter, element colour, --plain postfix tags (§1, §2, §5) ──
+// The contract half of the expand–contract: the renderers move onto T5's plumbing,
+// and the four `{color, plain}` combinations now differ on purpose.
+
+const T6 = `---
+next_id: 5
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 001: Blocker.
+
+- [ ] 002: Rich row. status:doing @matt #bug #parser
+      A note line.
+
+- [ ] 003: Blocked. blocked-by:001
+
+## Completed
+
+- [x] 004: Closed and blocked. blocked-by:001 @jo (2026-06-07)
+
+## Deferred
+
+## Won't Fix
+`;
+
+const ESC = '\x1b';
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, '');
+const rowFor = (out: string, id: string) => out.split('\n').find((l) => stripAnsi(l).includes(id))!;
+
+describe('T6 gutter — the state channel, glyph and colour (§1, §2)', () => {
+	it('every row leads with its state glyph, in every section', () => {
+		const out = run(T6, ['list', '--all']).output;
+		expect(rowFor(out, '001')).toBe('  - 001  Blocker.');
+		expect(rowFor(out, '003')).toBe('  ⊘ 003  Blocked.');
+		expect(rowFor(out, '004')).toContain('✓ 004');
+	});
+
+	it('claimed and the three closed sections each get their glyph', () => {
+		const out = run(T5, ['list', '--all']).output;
+		expect(rowFor(out, '003')).toContain('~ 003'); // claimed
+		expect(rowFor(out, '005')).toContain('⊘ 005'); // blocked + claimed → blocked
+		expect(rowFor(out, '006')).toContain('✓ 006'); // completed
+		expect(rowFor(out, '007')).toContain('» 007'); // deferred
+		expect(rowFor(out, '008')).toContain('× 008'); // won't fix
+	});
+
+	it('the gutter aligns — a blocked row no longer shifts the id right', () => {
+		const rows = run(T6, ['list']).output.split('\n');
+		const cols = rows.map((r) => r.indexOf(stripAnsi(r).match(/00\d/)![0]));
+		expect(new Set(cols).size).toBe(1);
+	});
+
+	it('the section tags are gone in glyph mode — the gutter carries the section', () => {
+		const out = run(T6, ['list', '--all']).output;
+		expect(out).not.toContain('[Completed]');
+		expect(out).not.toContain('[blocked]');
+	});
+
+	it('the gutter takes its state colour; open is uncoloured', () => {
+		const out = run(T6, ['list', '--all'], { color: true, plain: false }).output;
+		expect(rowFor(out, '003')).toContain(`${ESC}[31m⊘${ESC}[0m`); // blocked → red
+		expect(rowFor(out, '004')).toContain(`${ESC}[32m✓${ESC}[0m`); // completed → green
+		expect(rowFor(out, '001')).toContain('  - '); // open → no colour at all
+	});
+});
+
+describe('T6 element colours — same field, same colour, every row (§2)', () => {
+	const out = run(T6, ['list', '--all'], { color: true, plain: false }).output;
+
+	it('ids are cyan', () => {
+		expect(rowFor(out, '002')).toContain(`${ESC}[36m002${ESC}[0m`);
+	});
+
+	it('the status value is yellow and its key stays default', () => {
+		expect(rowFor(out, '002')).toContain(`status:${ESC}[33mdoing${ESC}[0m`);
+	});
+
+	it('assignees are magenta and labels blue', () => {
+		expect(rowFor(out, '002')).toContain(`${ESC}[35m@matt${ESC}[0m`);
+		expect(rowFor(out, '002')).toContain(`${ESC}[34m#bug${ESC}[0m`);
+		expect(rowFor(out, '002')).toContain(`${ESC}[34m#parser${ESC}[0m`);
+	});
+
+	it('the title dims when the issue is closed, and only then', () => {
+		expect(rowFor(out, '004')).toContain(`${ESC}[2mClosed and blocked.${ESC}[0m`);
+		expect(rowFor(out, '002')).toContain(' Rich row.');
+		expect(rowFor(out, '002')).not.toContain(`${ESC}[2m`);
+	});
+
+	it('--no-color keeps the gutter and glyphs, dropping only the colour (§5.4.2)', () => {
+		const plainish = run(T6, ['list', '--all'], { color: false, plain: false }).output;
+		expect(plainish).not.toContain(ESC);
+		expect(plainish).toContain('⊘ 003');
+		expect(stripAnsi(out)).toBe(plainish); // colour is the only difference
+	});
+});
+
+describe('T6 --plain — the colour-free rendering of the new design (§5)', () => {
+	const plain = run(T6, ['list', '--all'], { color: false, plain: true }).output;
+
+	it('emits no escape codes anywhere', () => {
+		expect(plain).not.toContain(ESC);
+	});
+
+	it('drops the gutter — indent + id + title + markers + [tags]', () => {
+		expect(rowFor(plain, '001')).toBe('  001  Blocker.');
+		expect(rowFor(plain, '002')).toBe('  002  Rich row. status:doing @matt #bug #parser …');
+	});
+
+	it('restores the postfix tags, tags last — after markers, date and note', () => {
+		expect(rowFor(plain, '003')).toBe('  003  Blocked. [blocked]');
+		expect(rowFor(plain, '004')).toBe('  004  Closed and blocked. @jo (2026-06-07) [Completed] [blocked]');
+	});
+
+	it('a closed-and-blocked row shows both tags — --plain has room the gutter does not', () => {
+		expect(rowFor(plain, '004')).toContain('[Completed] [blocked]');
+	});
+
+	it('casing is load-bearing: capitalized = stored, lowercase = derived (ADR 0003)', () => {
+		const all = run(T5, ['list', '--all'], { color: false, plain: true }).output;
+		expect(rowFor(all, '006')).toContain('[Completed]');
+		expect(rowFor(all, '007')).toContain('[Deferred]');
+		expect(rowFor(all, '008')).toContain("[Won't Fix]");
+		expect(rowFor(all, '004')).toContain('[blocked]');
+	});
+
+	it('claimed needs no tag — @who already carries the claim', () => {
+		const all = run(T5, ['list', '--all'], { color: false, plain: true }).output;
+		expect(rowFor(all, '003')).toBe('  003  Claimed. @matt');
+	});
+
+	it('--plain is the strongest flag — it wins over colour, silently (§5.4.1)', () => {
+		expect(run(T6, ['list', '--all'], { color: true, plain: true }).output).toBe(plain);
+	});
+});
+
+describe('T6 the same row renderer everywhere — list, next, ready, tree, children', () => {
+	const COMBOS = [
+		{ color: false, plain: false },
+		{ color: true, plain: false },
+		{ color: false, plain: true },
+		{ color: true, plain: true }
+	];
+
+	it('next and ready render the gutter in all four combinations', () => {
+		for (const render of COMBOS) {
+			for (const cmd of ['next', 'ready']) {
+				const out = run(T6, [cmd], render).output;
+				// The gutter is present in glyph mode and gone under --plain. Strip the
+				// colour first — in colour mode an SGR pair sits between glyph and id.
+				expect(stripAnsi(out).includes('- 001')).toBe(!render.plain);
+				expect(stripAnsi(out)).toContain('001  Blocker.');
+				if (!render.color || render.plain) expect(out).not.toContain(ESC);
+			}
+		}
+	});
+
+	it('ready colours ids and gutters like list does', () => {
+		const out = run(T6, ['ready'], { color: true, plain: false }).output;
+		expect(out).toContain(`${ESC}[36m001${ESC}[0m`);
+	});
+
+	it('tree inherits the gutter without waiting on its own ticket', () => {
+		const out = run(T6, ['tree']).output;
+		expect(rowFor(out, '003')).toContain('⊘ 003');
+		expect(out).not.toContain('[Completed]'); // tag gone in glyph mode
+		expect(rowFor(run(T6, ['tree'], { color: true, plain: false }).output, '001')).toContain(
+			`${ESC}[36m001${ESC}[0m`
+		);
+	});
+
+	it('tree under --plain drops the gutter and restores the tags', () => {
+		const out = run(T6, ['tree'], { color: false, plain: true }).output;
+		expect(out).not.toContain(ESC);
+		expect(rowFor(out, '003')).toBe('  003  Blocked. [blocked]');
+		expect(rowFor(out, '004')).toContain('[Completed] [blocked]');
+	});
+
+	it('show --children renders its child rows through the same renderer', () => {
+		const kids = `---\nnext_id: 4\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Parent.\n\n- [ ] 002: Kid. part-of:001 @jo\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(run(kids, ['show', '001', '--children']).output).toContain('~ 002');
+		expect(run(kids, ['show', '001', '--children'], { color: false, plain: true }).output).toContain(
+			'  002  Kid. @jo'
+		);
+	});
+});
+
+describe('T6 --json is untouched by any of it (§7, §8)', () => {
+	it('carries no escape codes, no glyphs, and still no state field', () => {
+		for (const argv of [['list', '--all'], ['next'], ['ready'], ['tree'], ['show', '004']]) {
+			const baseline = run(T6, [...argv, '--json']).output;
+			for (const render of [{ color: true, plain: false }, { color: false, plain: true }]) {
+				expect(run(T6, [...argv, '--json'], render).output).toBe(baseline);
+			}
+			expect(baseline).not.toContain(ESC);
+			expect(baseline).not.toContain('⊘');
+			// Reach the issue objects themselves — `list`/`ready`/`tree` emit arrays and
+			// `next` a `{issue, reason}` wrapper, so asserting on the root would name a
+			// guard it does not apply.
+			const parsed = JSON.parse(baseline);
+			const issues = Array.isArray(parsed) ? parsed : [parsed.issue ?? parsed];
+			expect(issues.length).toBeGreaterThan(0);
+			for (const it of issues) expect(it).not.toHaveProperty('state');
+		}
 	});
 });

@@ -36,7 +36,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree                                                   containment forest (⊘ = blocked)
+  tree                                                   containment forest
   doctor                                                 lint the file (exit nonzero on findings)
 
 Mutations:
@@ -53,6 +53,13 @@ Mutations:
 
 filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assignee <who>
          (AND across dimensions, OR within a repeated/comma-listed dimension)
+
+presentation (human-readable reads only; --json is never colourized):
+  --plain      no colour, no state gutter — state as postfix [tags] at the row's end
+  --color      force colour on;  --no-color  force it off (keeping the gutter)
+               colour otherwise follows NO_COLOR and whether stdout is a terminal
+
+state gutter:  - open   ~ claimed   ⊘ blocked   ✓ completed   » deferred   × won't fix
 ```
 
 IDs are forgiving: `1`, `001`, `m1`, `M001` all resolve to the same canonical id.
@@ -87,6 +94,11 @@ Every read (`list`/`next`/`ready`/`show`/`tree`) takes `--json` and emits the ma
 contract; human text is the default. Read emptiness **structurally** (`null`/`[]`), never
 from the exit code — an empty frontier is a normal exit 0.
 
+**`--json` is the only stable read surface — always use it.** The human-readable
+rendering (the state gutter, colour, `--plain`) is explicitly unstable and may change
+in any release; `--plain` gives you the absence of escape codes for `grep`/`wc`/`fzf`,
+not a parsing contract. Never scrape the text output.
+
 Each issue is an object:
 
 ```json
@@ -109,7 +121,7 @@ stop-vs-wait without treating empty as an error.
 ## Examples
 
 ```sh
-issues list                                  # open issues only, with ⊘/@/# markers
+issues list                                  # open issues only, with the state gutter
 issues list --all                            # every section
 issues add "Login button misaligned on iOS"  # -> Added 007: ...
 issues add "Wire parser" --blocked-by 4 --status wip --label parser,ui
