@@ -425,12 +425,14 @@ Tick each box as it lands, with the commit that carried it.
 - [x] 4. **`tree` filters** — reuse `list`'s flag set and predicate; default to open;
       implement ancestor scaffolding, dim in colour and trailing `/` in plain (§3).
       ([#29](https://github.com/elucidata/issues/issues/29))
-- [ ] 5. **`show`** — one-line header; the `state:` field with
+- [x] 5. **`show`** — one-line header; the `state:` field with
       suppression-when-closed; confined state colour; capitalized relationship
       suffixes and `Issues` → `Open` (§4).
-- [ ] 6. **Tests** — the four `{color, plain}` combinations across each read command;
+      ([#30](https://github.com/elucidata/issues/issues/30))
+- [x] 6. **Tests** — the four `{color, plain}` combinations across each read command;
       the precedence table; closed-and-blocked suppression on `show` and
       co-occurrence under `--plain`; a filtered `tree` with scaffolding in both modes.
+      ([#27](https://github.com/elucidata/issues/issues/27)–[#30](https://github.com/elucidata/issues/issues/30))
 - [ ] 7. **Docs** — regenerate `help`; update `skills/issues/SKILL.md` and `README` to
       teach the new flags and the glyph vocabulary; state §7's posture where `--json`
       is documented (§9.1).
@@ -489,6 +491,20 @@ Recorded as they land, per item 10.
   over letting the filter become invisible"), so the trailing `/` now appears wherever
   colour is unavailable, not only under `--plain`. The two modes the table *does* name
   behave exactly as written.
+- **§4.5's printed example is not reproducible verbatim** (item 5, #30). Two of its
+  lines cannot exist in this build, so the tests assert the dossier byte-for-byte
+  through the child rows and stop there:
+  - **The ids.** `ISS-042` cannot appear in an `ISSUES.md`: `ISSUE_RE` matches
+    `[A-Za-z]*[0-9]+`, which admits no hyphen, so the line does not parse as an issue
+    at all. The fixture uses `ISS042`. Either the example or the id grammar is wrong;
+    changing the grammar is a file-format change and nothing in this spec asked for one.
+  - **The closing advisory.** `! ISS-042 is blocked by ISS-039, which is closed` matches
+    none of `graphWarnings`' five kinds. It is exactly the cascade advisory §10 defers
+    to [#26](https://github.com/elucidata/issues/issues/26) — and on a *write* command
+    at that. A test now pins that nothing emits it.
+- **`show --children` child rows moved from six spaces to four** (item 5, #30).
+  Required by §4.5's example, which puts them one level under `children:`, not two. No
+  acceptance criterion named it, so it is recorded here rather than left invisible.
 - **Non-matching descendants of a match are dropped** (item 4, #29). §3.2 grants the
   exemption to ancestors only. A retained descendant would have no marker to
   distinguish it from a match, and the filter would stop meaning anything below a hit.

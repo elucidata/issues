@@ -700,10 +700,24 @@ function warningsFor(doc: Doc, idInput: string): string[] {
 }
 
 /**
- * `show <id>` — the full resolved dossier (§5 decision 17): status/assignee/labels,
- * relationships expanded with their target's title + open/closed state, derived
- * `⊘ blocked`, the note body, this issue's §3 warnings, and (with `--children`) its
- * containment subtree. Its own render path — terminal output is never double-spaced.
+ * `show <id>` — the full resolved dossier (§5 decision 17 / §4): status/assignee/labels,
+ * relationships expanded with their target's title and section, the note body, this
+ * issue's §3 warnings, and (with `--children`) its containment subtree. Its own render
+ * path — terminal output is never double-spaced.
+ *
+ * `show` does **not** import the gutter: a gutter is a column device and a subject line
+ * has no column to form. What carries across is the row *shape* — the dossier reads as
+ * a row, opened up.
+ *
+ * The header is one line, `id  title (date)` (§4.1). The old two-line split existed
+ * only to give the section suffix somewhere to sit; with state a field the split is
+ * vestigial, so the header sheds both `— Section` and `⊘ blocked`. The date stays
+ * inline — `serializeIssue` stores it inline, and a `date:` field would fabricate a key
+ * the file format does not have.
+ *
+ * The title is never state-coloured (§4.3): a title can only be one colour, which would
+ * reintroduce the precedence collapse `state:` exists to escape. It dims when closed —
+ * de-emphasis, not a state claim competing with the field.
  */
 export function cmdShow(
 	doc: Doc,
@@ -711,18 +725,19 @@ export function cmdShow(
 	opts: ShowOptions = {},
 	render: RenderOptions = DEFAULT_RENDER
 ): string {
-	// The dossier itself is redesigned in its own slice (§9.5); here `render` reaches
-	// only the child rows, which share the compact-row renderer (§1.1).
 	const { section, issue } = requireIssue(doc, idInput);
-	const mark = issue.checked ? ' [x]' : '';
+	const color = render.color && !render.plain;
 	const date = issue.date ? ` (${issue.date})` : '';
-	const blk = isBlocked(doc, issue) ? ' ⊘ blocked' : '';
-	const lines = [`${issue.id} — ${section}${mark}${date}${blk}`, issue.title];
-	if (issue.status) lines.push(`  status: ${issue.status}`);
-	if (issue.assignee) lines.push(`  assignee: @${issue.assignee}`);
-	if (issue.labels.length) lines.push(`  labels: ${issue.labels.map((l) => '#' + l).join(' ')}`);
-	if (issue.partOf) lines.push(`  part-of: ${resolveRef(doc, issue.partOf)}`);
-	for (const b of issue.blockedBy) lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id)}`);
+	const title = section === OPEN_SECTION ? issue.title : paint(issue.title, 'dim', color);
+	const lines = [`${paint(issue.id, 'cyan', color)}  ${title}${date}`];
+	lines.push(`  state: ${stateField(doc, issue, section, color)}`);
+	if (issue.status) lines.push(`  status: ${paint(issue.status, 'yellow', color)}`);
+	if (issue.assignee) lines.push(`  assignee: ${paint('@' + issue.assignee, 'magenta', color)}`);
+	if (issue.labels.length)
+		lines.push(`  labels: ${issue.labels.map((l) => paint('#' + l, 'blue', color)).join(' ')}`);
+	if (issue.partOf) lines.push(`  part-of: ${resolveRef(doc, issue.partOf, undefined, color)}`);
+	for (const b of issue.blockedBy)
+		lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id, color)}`);
 	for (const u of issue.uda) lines.push(`  ${u.key}: ${u.value}`);
 	for (const d of issue.detail) lines.push(`    ${d}`);
 	if (opts.children) {
@@ -731,22 +746,65 @@ export function cmdShow(
 			lines.push('  children:');
 			// No view — `show` renders every child unconditionally, so scaffolding has
 			// no analogue here (§4.4). Stated because it is an absence.
-			for (const k of kids) lines.push(...treeLines(doc, k, 2, render, undefined));
+			for (const k of kids) lines.push(...treeLines(doc, k, 1, render, undefined));
 		}
 	}
 	if (!opts.quiet) for (const w of warningsFor(doc, issue.id)) lines.push(`  ! ${w}`);
 	return lines.join('\n');
 }
 
-// Resolve a relationship pointer to a human-legible `id (title) — state` string, or
+/**
+ * The section axis in one capitalized vocabulary (§4.4). `Issues` is spoken as `Open`
+ * wherever state is named — `state: Issues` does not parse as English, and the glyph
+ * vocabulary has said "open" throughout — while the three closed sections keep their
+ * stored names verbatim.
+ *
+ * Capitalized = stored, lowercase = derived (§5.2 / ADR 0003). `Open` is the one
+ * capitalized token not verbatim from the file: the casing rule is about *which axis*
+ * a token belongs to, not about being a literal quote.
+ */
+function sectionLabel(section: SectionName): string {
+	return section === OPEN_SECTION ? 'Open' : section;
+}
+
+/**
+ * The `state:` field (§4.2) — one field naming **every** state that applies, which is
+ * the case the single-slot gutter structurally could not serve. Derived terms follow
+ * gutter precedence (`blocked` before `claimed`) and are **suppressed once the section
+ * is closed** (§1): a finished issue is not blocked, and its assignee is provenance,
+ * not a claim. So genuine co-occurrence is only ever `Open` + `blocked` + `claimed`.
+ *
+ * Nothing is lost by the suppression — a stale blocker stays fully visible on its
+ * `blocked-by:` line with an `— Open` suffix, and the assignee is still rendered.
+ *
+ * This field is the dossier's structural equivalent of the gutter: the one designated
+ * place state is spoken, and so the only place state colour appears (§4.3). The tokens
+ * take their gutter colours, which is why they read off `STATE_GLYPHS`.
+ */
+function stateField(doc: Doc, issue: Issue, section: SectionName, color: boolean): string {
+	const token = (label: string, state: IssueState) =>
+		paint(label, STATE_GLYPHS[state].color, color);
+	// Closed is one token: the section subsumes the derived axis.
+	if (section !== OPEN_SECTION)
+		return token(sectionLabel(section), issueState(doc, issue, section));
+	// Open is a list, in gutter-precedence order.
+	const tokens = [token(sectionLabel(section), 'open')];
+	if (isBlocked(doc, issue)) tokens.push(token('blocked', 'blocked'));
+	if (issue.assignee) tokens.push(token('claimed', 'claimed'));
+	return tokens.join(', ');
+}
+
+// Resolve a relationship pointer to a human-legible `id (title) — Section` string, or
 // `id (not found)` when it dangles (§3.1/§3.2). `selfId` flags a self-reference edge.
-function resolveRef(doc: Doc, rawId: string, selfId?: string): string {
+// The id is element-typed cyan (§4.3); the suffix stays default — state colour lives
+// in `state:` and nowhere else.
+function resolveRef(doc: Doc, rawId: string, selfId: string | undefined, color: boolean): string {
 	const id = normalizeId(rawId, doc.pattern);
-	if (selfId && id === selfId) return `${id} (self-reference — ignored)`;
+	const shown = paint(id, 'cyan', color);
+	if (selfId && id === selfId) return `${shown} (self-reference — ignored)`;
 	const found = findIssue(doc, id);
-	if (!found) return `${id} (not found)`;
-	const state = found.section === OPEN_SECTION ? 'open' : found.section.toLowerCase();
-	return `${id} (${found.issue.title}) — ${state}`;
+	if (!found) return `${shown} (not found)`;
+	return `${shown} (${found.issue.title}) — ${sectionLabel(found.section)}`;
 }
 
 export interface ListOptions {

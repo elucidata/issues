@@ -504,20 +504,21 @@ function warningsFor(doc, idInput) {
 }
 function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
   const { section, issue } = requireIssue(doc, idInput);
-  const mark = issue.checked ? " [x]" : "";
+  const color = render.color && !render.plain;
   const date = issue.date ? ` (${issue.date})` : "";
-  const blk = isBlocked(doc, issue) ? " ⊘ blocked" : "";
-  const lines = [`${issue.id} — ${section}${mark}${date}${blk}`, issue.title];
+  const title = section === OPEN_SECTION ? issue.title : paint(issue.title, "dim", color);
+  const lines = [`${paint(issue.id, "cyan", color)}  ${title}${date}`];
+  lines.push(`  state: ${stateField(doc, issue, section, color)}`);
   if (issue.status)
-    lines.push(`  status: ${issue.status}`);
+    lines.push(`  status: ${paint(issue.status, "yellow", color)}`);
   if (issue.assignee)
-    lines.push(`  assignee: @${issue.assignee}`);
+    lines.push(`  assignee: ${paint("@" + issue.assignee, "magenta", color)}`);
   if (issue.labels.length)
-    lines.push(`  labels: ${issue.labels.map((l) => "#" + l).join(" ")}`);
+    lines.push(`  labels: ${issue.labels.map((l) => paint("#" + l, "blue", color)).join(" ")}`);
   if (issue.partOf)
-    lines.push(`  part-of: ${resolveRef(doc, issue.partOf)}`);
+    lines.push(`  part-of: ${resolveRef(doc, issue.partOf, undefined, color)}`);
   for (const b of issue.blockedBy)
-    lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id)}`);
+    lines.push(`  blocked-by: ${resolveRef(doc, b, issue.id, color)}`);
   for (const u of issue.uda)
     lines.push(`  ${u.key}: ${u.value}`);
   for (const d of issue.detail)
@@ -527,7 +528,7 @@ function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
     if (kids.length) {
       lines.push("  children:");
       for (const k of kids)
-        lines.push(...treeLines(doc, k, 2, render, undefined));
+        lines.push(...treeLines(doc, k, 1, render, undefined));
     }
   }
   if (!opts.quiet)
@@ -536,15 +537,29 @@ function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
   return lines.join(`
 `);
 }
-function resolveRef(doc, rawId, selfId) {
+function sectionLabel(section) {
+  return section === OPEN_SECTION ? "Open" : section;
+}
+function stateField(doc, issue, section, color) {
+  const token = (label, state) => paint(label, STATE_GLYPHS[state].color, color);
+  if (section !== OPEN_SECTION)
+    return token(sectionLabel(section), issueState(doc, issue, section));
+  const tokens = [token(sectionLabel(section), "open")];
+  if (isBlocked(doc, issue))
+    tokens.push(token("blocked", "blocked"));
+  if (issue.assignee)
+    tokens.push(token("claimed", "claimed"));
+  return tokens.join(", ");
+}
+function resolveRef(doc, rawId, selfId, color) {
   const id = normalizeId(rawId, doc.pattern);
+  const shown = paint(id, "cyan", color);
   if (selfId && id === selfId)
-    return `${id} (self-reference — ignored)`;
+    return `${shown} (self-reference — ignored)`;
   const found = findIssue(doc, id);
   if (!found)
-    return `${id} (not found)`;
-  const state = found.section === OPEN_SECTION ? "open" : found.section.toLowerCase();
-  return `${id} (${found.issue.title}) — ${state}`;
+    return `${shown} (not found)`;
+  return `${shown} (${found.issue.title}) — ${sectionLabel(found.section)}`;
 }
 function markers(issue, color) {
   let s = "";

@@ -147,10 +147,24 @@ export interface ShowOptions {
     quiet?: boolean;
 }
 /**
- * `show <id>` — the full resolved dossier (§5 decision 17): status/assignee/labels,
- * relationships expanded with their target's title + open/closed state, derived
- * `⊘ blocked`, the note body, this issue's §3 warnings, and (with `--children`) its
- * containment subtree. Its own render path — terminal output is never double-spaced.
+ * `show <id>` — the full resolved dossier (§5 decision 17 / §4): status/assignee/labels,
+ * relationships expanded with their target's title and section, the note body, this
+ * issue's §3 warnings, and (with `--children`) its containment subtree. Its own render
+ * path — terminal output is never double-spaced.
+ *
+ * `show` does **not** import the gutter: a gutter is a column device and a subject line
+ * has no column to form. What carries across is the row *shape* — the dossier reads as
+ * a row, opened up.
+ *
+ * The header is one line, `id  title (date)` (§4.1). The old two-line split existed
+ * only to give the section suffix somewhere to sit; with state a field the split is
+ * vestigial, so the header sheds both `— Section` and `⊘ blocked`. The date stays
+ * inline — `serializeIssue` stores it inline, and a `date:` field would fabricate a key
+ * the file format does not have.
+ *
+ * The title is never state-coloured (§4.3): a title can only be one colour, which would
+ * reintroduce the precedence collapse `state:` exists to escape. It dims when closed —
+ * de-emphasis, not a state claim competing with the field.
  */
 export declare function cmdShow(doc: Doc, idInput: string, opts?: ShowOptions, render?: RenderOptions): string;
 export interface ListOptions {

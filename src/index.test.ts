@@ -265,8 +265,8 @@ describe('cmdEdit / cmdNote / cmdShow', () => {
 
 	it('renders an issue with its note', () => {
 		const out = cmdShow(parse(SAMPLE), '005');
-		expect(out).toContain('005 — Issues');
-		expect(out).toContain('(Embed) Mask the scrim');
+		expect(out.split('\n')[0]).toContain('005  (Embed) Mask the scrim');
+		expect(out).toContain('  state: Open');
 		expect(out).toContain('When capturing a particular element');
 	});
 });
@@ -987,14 +987,15 @@ describe('T4 reads — list compact markers (§5 decision 17)', () => {
 });
 
 describe('T4 reads — show full dossier (§5 decision 17)', () => {
-	it('expands relationships with titles + state and derives ⊘ blocked', () => {
+	it('expands relationships with titles + state and names blocked in state:', () => {
 		const out = run(ANNOTATED, ['show', '007']).output;
-		expect(out).toContain('⊘ blocked'); // blocked-by:004, 004 open
+		// §4.2 moved `⊘ blocked` out of the header and into the unified field.
+		expect(out).toContain('state: Open, blocked'); // blocked-by:004, 004 open
 		expect(out).toContain('status: in-progress');
 		expect(out).toContain('assignee: @matt');
 		expect(out).toContain('labels: #parser #round-trip');
 		expect(out).toMatch(/part-of: 002/);
-		expect(out).toMatch(/blocked-by: 004 \(A blocker\.\) — open/);
+		expect(out).toMatch(/blocked-by: 004 \(A blocker\.\) — Open/); // §4.4 capitalizes
 	});
 
 	it('--children renders the containment subtree', () => {
@@ -1752,5 +1753,215 @@ describe('T7 tree — what scaffolding does not touch (§3.2, §4.4)', () => {
 			expect(run(T7, ['tree', '--json', ...argv]).output).toBe(baseline);
 		}
 		expect(JSON.parse(baseline)).toHaveLength(4); // 001, 005, 006 and 008 are the roots
+	});
+});
+
+// ── T8 — show: one-line header, unified state:, capitalized sections (§4) ────
+
+// The spec's own §4.5 example, rebuilt as a fixture so the dossier can be asserted
+// byte-for-byte against the document that specified it.
+const T8 = `---
+next_id: 46
+pattern: "ISS###"
+---
+# T
+
+## Issues
+
+- [ ] ISS030: Round-trip fidelity
+
+- [ ] ISS041: Land the tokenizer rewrite
+
+- [ ] ISS042: Parser drops trailing detail lines on reserialize part-of:ISS030 blocked-by:ISS041,ISS039 spike:2d status:doing @matt #bug #parser (2026-01-14)
+      Reproduces only when the note body ends without a blank line.
+
+- [ ] ISS044: Add regression fixture part-of:ISS042 @jo #parser
+
+- [ ] ISS045: Backfill the round-trip corpus part-of:ISS042 blocked-by:ISS041 #parser
+
+## Completed
+
+- [x] ISS039: Pin the detail-line grammar (2026-01-10)
+
+## Deferred
+
+## Won't Fix
+`;
+
+// §4.5 verbatim, down to the child rows — with two documented departures from the
+// printed example (see the spec's §9.0):
+//   · the ids are `ISS042`, not `ISS-042`: `ISSUE_RE` is `[A-Za-z]*[0-9]+`, so a
+//     hyphenated id cannot exist in an ISSUES.md at all.
+//   · the example's closing `! … is blocked by …, which is closed` line has no
+//     counterpart in `graphWarnings` — it is the cascade advisory design §10 defers
+//     to #26, on a *write* command. Nothing here should emit it.
+const DOSSIER = [
+	'ISS042  Parser drops trailing detail lines on reserialize (2026-01-14)',
+	'  state: Open, blocked, claimed',
+	'  status: doing',
+	'  assignee: @matt',
+	'  labels: #bug #parser',
+	'  part-of: ISS030 (Round-trip fidelity) — Open',
+	'  blocked-by: ISS041 (Land the tokenizer rewrite) — Open',
+	'  blocked-by: ISS039 (Pin the detail-line grammar) — Completed',
+	'  spike: 2d',
+	'    Reproduces only when the note body ends without a blank line.',
+	'  children:'
+].join('\n');
+
+describe('T8 show — the §4.5 dossier, byte-for-byte through the child rows', () => {
+	it('emits no advisory for a closed blocker — §4.5s last line is #26s, not ours', () => {
+		expect(run(T8, ['show', 'ISS042']).output).not.toContain('!');
+		expect(graphWarnings(parse(T8))).toEqual([]);
+	});
+
+	it('renders the spec example exactly, in glyph mode', () => {
+		const out = run(T8, ['show', 'ISS042', '--children']).output;
+		expect(out).toBe(
+			DOSSIER +
+				'\n    ~ ISS044  Add regression fixture @jo #parser' +
+				'\n    ⊘ ISS045  Backfill the round-trip corpus #parser'
+		);
+	});
+
+	it('renders the --plain example exactly — only the child rows differ', () => {
+		const out = run(T8, ['show', 'ISS042', '--children'], { color: false, plain: true }).output;
+		expect(out).toBe(
+			DOSSIER +
+				'\n    ISS044  Add regression fixture @jo #parser' +
+				'\n    ISS045  Backfill the round-trip corpus #parser [blocked]'
+		);
+	});
+
+	it('the two are byte-identical down to children: — the dossier is plain-native', () => {
+		const glyph = run(T8, ['show', 'ISS042', '--children']).output;
+		const plain = run(T8, ['show', 'ISS042', '--children'], { color: false, plain: true }).output;
+		const upTo = (s: string) => s.slice(0, s.indexOf('children:') + 'children:'.length);
+		expect(upTo(plain)).toBe(upTo(glyph));
+	});
+});
+
+describe('T8 show — the header collapses to one line (§4.1)', () => {
+	const out = run(T8, ['show', 'ISS042']).output;
+
+	it('is id  title (date), with the date inline', () => {
+		expect(out.split('\n')[0]).toBe(
+			'ISS042  Parser drops trailing detail lines on reserialize (2026-01-14)'
+		);
+	});
+
+	it('sheds the section suffix, the [x] mark and ⊘ blocked', () => {
+		expect(out.split('\n')[0]).not.toContain('—');
+		expect(out).not.toContain('[x]');
+		expect(out).not.toContain('⊘ blocked');
+	});
+});
+
+describe('T8 show — the unified state: field (§4.2)', () => {
+	const stateOf = (text: string, id: string) =>
+		run(text, ['show', id]).output.split('\n').find((l) => l.startsWith('  state:'))!;
+
+	it('names every applicable state, derived terms in blocked-then-claimed order', () => {
+		expect(stateOf(T8, 'ISS042')).toBe('  state: Open, blocked, claimed');
+		expect(stateOf(T8, 'ISS041')).toBe('  state: Open');
+		expect(stateOf(T8, 'ISS044')).toBe('  state: Open, claimed');
+		expect(stateOf(T8, 'ISS045')).toBe('  state: Open, blocked');
+	});
+
+	it('the three closed sections speak their own name', () => {
+		expect(stateOf(T5, '006')).toBe('  state: Completed');
+		expect(stateOf(T5, '007')).toBe('  state: Deferred');
+		expect(stateOf(T5, '008')).toBe("  state: Won't Fix");
+	});
+
+	it('suppresses the derived axis once closed — but keeps the evidence', () => {
+		// 006 is Completed, blocked-by an open 001, and assigned to @matt.
+		const out = run(T5, ['show', '006']).output;
+		expect(out).toContain('  state: Completed');
+		expect(out).not.toContain('blocked,');
+		expect(out).not.toContain('claimed');
+		// Nothing is lost: the stale blocker is still fully visible with its — Open
+		// suffix, and the assignee is still rendered — just not relabelled a claim.
+		expect(out).toContain('blocked-by: 001 (Open blocker.) — Open');
+		expect(out).toContain('assignee: @matt');
+	});
+});
+
+describe('T8 show — one capitalized vocabulary for the section axis (§4.4)', () => {
+	it('resolveRef suffixes capitalize, matching the token in state:', () => {
+		const out = run(T8, ['show', 'ISS042']).output;
+		expect(out).toContain('— Completed');
+		expect(out).not.toContain('— completed');
+	});
+
+	it('the Issues section is spoken as Open, in both places', () => {
+		const out = run(T8, ['show', 'ISS042']).output;
+		expect(out).toContain('blocked-by: ISS041 (Land the tokenizer rewrite) — Open');
+		expect(out).toContain('  state: Open');
+		expect(out).not.toContain('Issues');
+	});
+
+	it('a dangling and a self-referencing pointer are unchanged', () => {
+		expect(run(GRAPH, ['show', '003']).output).toMatch(/part-of: 998 \(not found\)/);
+		expect(run(GRAPH, ['show', '001']).output).toMatch(/self-reference — ignored/);
+	});
+});
+
+describe('T8 show — colour is confined to the state: field (§4.3)', () => {
+	const out = run(T8, ['show', 'ISS042', '--children'], { color: true, plain: false }).output;
+	const line = (prefix: string) => out.split('\n').find((l) => stripAnsi(l).startsWith(prefix))!;
+
+	it('each state token takes its own colour', () => {
+		expect(line('  state:')).toBe(
+			`  state: Open, ${ESC}[31mblocked${ESC}[0m, ${ESC}[33mclaimed${ESC}[0m`
+		);
+	});
+
+	it('the title is never state-coloured', () => {
+		const header = out.split('\n')[0]!;
+		expect(header).toContain('  Parser drops trailing detail lines on reserialize (2026-01-14)');
+		expect(header).not.toContain(`${ESC}[31m`);
+		expect(header).not.toContain(`${ESC}[33m`);
+		expect(header).not.toContain(`${ESC}[2m`);
+	});
+
+	it('the title dims when the issue is closed — de-emphasis, not a state claim', () => {
+		const closed = run(T8, ['show', 'ISS039'], { color: true, plain: false }).output;
+		expect(closed.split('\n')[0]).toContain(`${ESC}[2mPin the detail-line grammar${ESC}[0m`);
+	});
+
+	it('everything else is element-typed, ids inside relationships included', () => {
+		expect(out.split('\n')[0]).toContain(`${ESC}[36mISS042${ESC}[0m`);
+		expect(line('  part-of:')).toContain(`${ESC}[36mISS030${ESC}[0m`);
+		expect(line('  blocked-by:')).toContain(`${ESC}[36mISS041${ESC}[0m`);
+		expect(line('  status:')).toBe(`  status: ${ESC}[33mdoing${ESC}[0m`);
+		expect(line('  assignee:')).toBe(`  assignee: ${ESC}[35m@matt${ESC}[0m`);
+		expect(line('  labels:')).toBe(`  labels: ${ESC}[34m#bug${ESC}[0m ${ESC}[34m#parser${ESC}[0m`);
+	});
+
+	it('the relationship suffix is default-coloured — state colour lives in one place', () => {
+		expect(line('  part-of:')).toBe(
+			`  part-of: ${ESC}[36mISS030${ESC}[0m (Round-trip fidelity) — Open`
+		);
+	});
+
+	it('--plain keeps state: bare while child rows bracket their derived tags (§5.3)', () => {
+		const plain = run(T8, ['show', 'ISS042', '--children'], { color: false, plain: true }).output;
+		expect(plain).not.toContain(ESC);
+		expect(plain).toContain('  state: Open, blocked, claimed'); // bare — key: delimits
+		expect(plain).toContain('[blocked]'); // bracketed on a row — no key: to delimit
+	});
+});
+
+describe('T8 show --json is unchanged (§4, §8)', () => {
+	it('carries no state field, no colour, and the same shape as before', () => {
+		const baseline = run(T8, ['show', 'ISS042', '--children', '--json']).output;
+		for (const render of [{ color: true, plain: false }, { color: false, plain: true }]) {
+			expect(run(T8, ['show', 'ISS042', '--children', '--json'], render).output).toBe(baseline);
+		}
+		const parsed = JSON.parse(baseline);
+		expect(parsed).not.toHaveProperty('state');
+		expect(parsed.section).toBe('Issues'); // the raw section, not the spoken label
+		expect(parsed.blocked).toBe(true);
 	});
 });
