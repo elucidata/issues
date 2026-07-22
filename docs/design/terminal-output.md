@@ -533,7 +533,7 @@ Recorded as they land, per item 10.
     at all. The fixture uses `ISS042`. Either the example or the id grammar is wrong;
     changing the grammar is a file-format change and nothing in this spec asked for one.
   - **The closing advisory.** `! ISS-042 is blocked by ISS-039, which is closed` matches
-    none of `graphWarnings`' five kinds. It is exactly the cascade advisory §10 defers
+    none of the graph-advisory kinds the finding model derives. It is exactly the cascade advisory §10 defers
     to [#26](https://github.com/elucidata/issues/issues/26) — and on a *write* command
     at that. A test now pins that nothing emits it.
 - **`show --children` child rows moved from six spaces to four** (item 5, #30).

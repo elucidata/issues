@@ -75,7 +75,7 @@ export declare function cmdNote(doc: Doc, idInput: string, text: string): string
 /**
  * `block <id> --by <blocker>` — add one blocker (§5 decision 3). Self-reference is
  * the one hard **reject**; unknown-blocker / cycle are warn-but-write (surfaced by
- * the caller via `graphWarnings`). Re-blocking an existing edge is an idempotent no-op.
+ * the caller via `findings`). Re-blocking an existing edge is an idempotent no-op.
  */
 export declare function cmdBlock(doc: Doc, idInput: string, byInput: string): string;
 /**
@@ -183,27 +183,6 @@ export declare function cmdList(doc: Doc, opts?: ListOptions, filters?: Frontier
  * derived; nothing is written back.
  */
 export declare function isBlocked(doc: Doc, issue: Issue): boolean;
-/**
- * The §3 advisory warnings, derived read-time as the graph is walked over the open
- * `Issues` section. Every anomaly fails open (§3.4 / §4.6) — these change nothing
- * about frontier membership, they only inform. Five kinds:
- *   · self-reference     — `A blocked-by A`: edge ignored (§3.1)
- *   · dangling blocker   — id found nowhere: fails open (§3.1)
- *   · won't-fix blocker  — gate satisfied by a rejected issue (§3.1, advisory)
- *   · dangling part-of   — parent found nowhere: child renders top-level (§3.2)
- *   · cycle              — mutual deadlock: members stay blocked, never broken (§3.1)
- * Exported for focused unit tests and reused by the read commands.
- */
-export declare function graphWarnings(doc: Doc): string[];
-/**
- * The ADR 0007 file-format compat advisory. A file may carry an optional `schema:`
- * frontmatter key naming its format version. This build understands
- * `SUPPORTED_SCHEMA`; anything newer (or non-numeric) is surfaced as an advisory
- * and **never blocks** the read or write — the file is always yours to hand-edit.
- * An absent key is the original/legacy format: silent, never rejected. Dormant
- * until a breaking format change first writes the key.
- */
-export declare function compatWarnings(doc: Doc): string[];
 export interface FrontierFilters {
     status?: string[];
     label?: string[];
@@ -262,9 +241,9 @@ export interface Finding {
 export declare const FINDING_SEVERITY: Record<FindingCode, Severity>;
 /**
  * Every anomaly the file carries at read time (ADR 0003 — nothing stored), as
- * structured findings. Folds the logic of `graphWarnings` + `doctorFindings` +
- * `compatWarnings` into one producer, with two behaviour changes the string
- * channel never had (ADR 0009 §6):
+ * structured findings. The single producer for every surface — graph advisories,
+ * declared-status mismatches, malformed lines, and `schema:` compat — with two
+ * behaviour changes the old string channel never had (ADR 0009 §6):
  *   · the graph walk **broadens to every section** — a dangling / self / won't-fix
  *     blocker or dangling part-of on a *closed* row now fires, not only on `Issues`;
  *   · **`deferred-blocker`** joins `wontfix-blocker` — a blocker in `Deferred`
@@ -281,7 +260,6 @@ export declare function findings(doc: Doc, text: string): Finding[];
  * The core never wraps — report prose is authored short and split by hand.
  */
 export declare function formatFinding(f: Finding, color: boolean, density?: 'inline' | 'report'): string;
-export declare function doctorFindings(doc: Doc, text: string): string[];
 /**
  * `doctor` — the grouped report (findings.md §5.1): findings grouped by severity
  * (errors first), prose tier headers, a footer tally. `No findings.` when clean.

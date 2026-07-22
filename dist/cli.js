@@ -1527,7 +1527,7 @@ function resolveColor(flags, env, isTTY, plain) {
 // package.json
 var package_default = {
   name: "@elucidata/issues",
-  version: "0.3.0",
+  version: "0.4.0",
   description: "A tiny, dependency-free issue tracker whose database is a human-editable ISSUES.md file.",
   type: "module",
   engines: {

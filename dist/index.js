@@ -667,49 +667,6 @@ function isBlocked(doc, issue) {
   const open = openIdSet(doc);
   return blockerIds(doc, issue).some((b) => open.has(b));
 }
-function graphWarnings(doc) {
-  const warnings = [];
-  const all = allIdSet(doc);
-  const wontfix = idSet(doc, WONTFIX_SECTION);
-  for (const it of doc.sections.get(OPEN_SECTION) ?? []) {
-    for (const raw of it.blockedBy) {
-      const b = normalizeId(raw, doc.pattern);
-      if (b === it.id) {
-        warnings.push(`${it.id}: blocked-by ${b} is a self-reference — edge ignored`);
-      } else if (!all.has(b)) {
-        warnings.push(`${it.id}: blocked-by ${b} not found — fails open (does not block)`);
-      } else if (wontfix.has(b)) {
-        warnings.push(`${it.id}: blocker ${b} is won't-fix — gate satisfied by a rejected issue`);
-      }
-    }
-    if (it.partOf) {
-      const p = normalizeId(it.partOf, doc.pattern);
-      if (!all.has(p)) {
-        warnings.push(`${it.id}: part-of ${p} not found — rendered top-level`);
-      }
-    }
-  }
-  for (const cycle of detectCycles(doc)) {
-    warnings.push(`blocked-by cycle: ${cycle.join(" → ")} → ${cycle[0]} — members stay blocked`);
-  }
-  return warnings;
-}
-function compatWarnings(doc) {
-  const entry = doc.frontmatter.find((e) => e.key === "schema");
-  if (!entry)
-    return [];
-  const raw = entry.raw.trim().replace(/^["']|["']$/g, "");
-  const n = Number(raw);
-  if (raw === "" || !Number.isFinite(n)) {
-    return [`schema:${raw} is not a recognized format version — proceeding, the file may not round-trip cleanly`];
-  }
-  if (n > SUPPORTED_SCHEMA) {
-    return [
-      `file declares schema ${n}; this build understands schema ${SUPPORTED_SCHEMA} — proceeding, it may not round-trip cleanly (upgrade \`issues\`)`
-    ];
-  }
-  return [];
-}
 function detectCycles(doc) {
   const openIds = openIdSet(doc);
   const adj = new Map;
@@ -1170,35 +1127,6 @@ function listView(doc, opts, filters) {
         view.add(it.id);
   return view;
 }
-function doctorFindings(doc, text) {
-  const out = [...graphWarnings(doc)];
-  const declared = declaredStatuses(doc);
-  if (declared) {
-    for (const { issue } of allEntries(doc))
-      if (issue.status && !declared.has(issue.status))
-        out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
-  }
-  out.push(...malformedLines(text, doc.pattern));
-  return out;
-}
-function malformedLines(text, pattern) {
-  const issueRe = issueLineRe(pattern);
-  const out = [];
-  let inSection = false;
-  for (const line of text.split(`
-`)) {
-    if (/^## /.test(line)) {
-      inSection = true;
-      continue;
-    }
-    if (!inSection || line.trim() === "")
-      continue;
-    if (issueRe.test(line) || /^\s+/.test(line))
-      continue;
-    out.push(`malformed line (not an issue or note): ${line.trim()}`);
-  }
-  return out;
-}
 function cmdDoctor(doc, text, color = false) {
   const all = findings(doc, text);
   if (!all.length)
@@ -1581,14 +1509,11 @@ export {
   issueState,
   isTakeable,
   isBlocked,
-  graphWarnings,
   frontier,
   formatId,
   formatFinding,
   findings,
   findIssue,
-  doctorFindings,
-  compatWarnings,
   cmdUnset,
   cmdUnlabel,
   cmdUnblock,

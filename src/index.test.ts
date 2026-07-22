@@ -15,7 +15,6 @@ import {
 	isBlocked,
 	isTakeable,
 	frontier,
-	graphWarnings,
 	cmdNext,
 	cmdReady,
 	cmdBlock,
@@ -28,8 +27,6 @@ import {
 	cmdUnset,
 	cmdTree,
 	cmdDoctor,
-	doctorFindings,
-	compatWarnings,
 	findings,
 	formatFinding,
 	FINDING_SEVERITY,
@@ -598,35 +595,45 @@ describe('T3 graph derivation — fail-open blocking (§3.1)', () => {
 	});
 });
 
-describe('T3 graph derivation — warnings (§3, fail-open advisories)', () => {
-	const warns = graphWarnings(parse(GRAPH));
-	const has = (re: RegExp) => warns.some((w) => re.test(w));
+describe('T3 graph derivation — findings (§3, fail-open advisories)', () => {
+	const fs = findings(parse(GRAPH), GRAPH);
+	const find = (code: FindingCode, id: string) =>
+		fs.find((f) => f.code === code && f.subjects.includes(id));
 
-	it('warns on a self-reference and reports the edge ignored', () => {
-		expect(has(/001.*self-ref/i)).toBe(true);
+	it('a self-reference is a self-blocker error on 001', () => {
+		const f = find('self-blocker', '001');
+		expect(f).toBeDefined();
+		expect(f!.severity).toBe('error');
 	});
 
-	it('warns on a dangling blocker (id 999 found nowhere)', () => {
-		expect(has(/002.*999/)).toBe(true);
+	it('a dangling blocker (id 999 found nowhere) mentions the missing id', () => {
+		const f = find('dangling-blocker', '002');
+		expect(f).toBeDefined();
+		expect(f!.mentions).toContain('999');
 	});
 
-	it('warns on a dangling part-of (parent 998 found nowhere)', () => {
-		expect(has(/003.*part-of.*998/i)).toBe(true);
+	it('a dangling part-of (parent 998 found nowhere) mentions the missing parent', () => {
+		const f = find('dangling-part-of', '003');
+		expect(f).toBeDefined();
+		expect(f!.mentions).toContain('998');
 	});
 
 	it('emits the won\'t-fix-blocker advisory (gate satisfied by a rejected blocker)', () => {
-		expect(has(/004.*(won.?t.?fix|010)/i)).toBe(true);
+		const f = find('wontfix-blocker', '004');
+		expect(f).toBeDefined();
+		expect(f!.severity).toBe('advisory');
+		expect(f!.mentions).toContain('010');
 	});
 
-	it('detects the 005↔006 cycle and reports both members', () => {
-		const cycleWarn = warns.find((w) => /cycle/i.test(w));
-		expect(cycleWarn).toBeDefined();
-		expect(cycleWarn).toContain('005');
-		expect(cycleWarn).toContain('006');
+	it('detects the 005↔006 cycle and reports both members as subjects', () => {
+		const f = fs.find((x) => x.code === 'cycle');
+		expect(f).toBeDefined();
+		expect(f!.subjects).toContain('005');
+		expect(f!.subjects).toContain('006');
 	});
 
-	it('a clean graph produces no warnings', () => {
-		expect(graphWarnings(parse(SAMPLE))).toEqual([]);
+	it('a clean graph produces no findings', () => {
+		expect(findings(parse(SAMPLE), SAMPLE)).toEqual([]);
 	});
 });
 
@@ -1090,7 +1097,7 @@ describe('T4 doctor — the finding model report (findings.md §5)', () => {
 describe('finding model — the broadened walk and severity tiers', () => {
 	// A dangling blocker on a Completed row, a self-blocker on a Deferred row, and a
 	// dangling part-of on a Won't Fix row — none in the open section. The old
-	// `graphWarnings` walk was blind to all three (§6).
+	// open-section-only string walk was blind to all three (§6).
 	const ALL_SECTIONS = `---
 next_id: 40
 pattern: "###"
@@ -1653,24 +1660,31 @@ schema: 99
 ## Won't Fix
 `;
 
+	const schemaFinds = (t: string) =>
+		findings(parse(t), t).filter((f) => f.code === 'schema-unparseable' || f.code === 'schema-too-new');
+
 	it('an unversioned file (no schema key) is silent — absent ⇒ legacy, never rejected', () => {
-		expect(compatWarnings(parse(SAMPLE))).toEqual([]);
+		expect(schemaFinds(SAMPLE)).toEqual([]);
 	});
 
 	it('a recognized schema (≤ supported) is silent', () => {
 		const v1 = SAMPLE.replace('pattern: "###"', 'pattern: "###"\nschema: 1');
-		expect(compatWarnings(parse(v1))).toEqual([]);
+		expect(schemaFinds(v1)).toEqual([]);
 	});
 
 	it('a newer schema warns but never rejects — advisory only', () => {
-		const warns = compatWarnings(parse(NEWER));
-		expect(warns).toHaveLength(1);
-		expect(warns[0]).toMatch(/schema 99/);
+		const fs = schemaFinds(NEWER);
+		expect(fs).toHaveLength(1);
+		expect(fs[0]!.code).toBe('schema-too-new');
+		expect(fs[0]!.severity).toBe('advisory');
+		expect(fs[0]!.value).toBe('99');
 	});
 
 	it('a non-numeric schema warns rather than throwing', () => {
 		const bad = SAMPLE.replace('pattern: "###"', 'pattern: "###"\nschema: draft');
-		expect(compatWarnings(parse(bad))).toHaveLength(1);
+		const fs = schemaFinds(bad);
+		expect(fs).toHaveLength(1);
+		expect(fs[0]!.code).toBe('schema-unparseable');
 	});
 
 	it('the schema key round-trips verbatim — reserved, preserved, never rewritten', () => {
@@ -2275,7 +2289,7 @@ pattern: "ISS###"
 //   · the ids are `ISS042`, not `ISS-042`: `ISSUE_RE` is `[A-Za-z]*[0-9]+`, so a
 //     hyphenated id cannot exist in an ISSUES.md at all.
 //   · the example's closing `! … is blocked by …, which is closed` line has no
-//     counterpart in `graphWarnings` — it is the cascade advisory design §10 defers
+//     counterpart in `findings` — it is the cascade advisory design §10 defers
 //     to #26, on a *write* command. Nothing here should emit it.
 const DOSSIER = [
 	'ISS042  Parser drops trailing detail lines on reserialize (2026-01-14)',
@@ -2294,7 +2308,7 @@ const DOSSIER = [
 describe('T8 show — the §4.5 dossier, byte-for-byte through the child rows', () => {
 	it('emits no advisory for a closed blocker — §4.5s last line is #26s, not ours', () => {
 		expect(run(T8, ['show', 'ISS042']).output).not.toContain('!');
-		expect(graphWarnings(parse(T8))).toEqual([]);
+		expect(findings(parse(T8), T8)).toEqual([]);
 	});
 
 	it('renders the spec example exactly, in glyph mode', () => {
@@ -2550,7 +2564,7 @@ describe('T10 prefixed id patterns round-trip, hyphens included', () => {
 		const odd = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] -42: Not an id.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
 		expect(parse(odd).sections.get('Issues')).toHaveLength(0);
 		// and `doctor` says so rather than dropping it silently
-		expect(doctorFindings(parse(odd), odd).some((f) => /malformed line/.test(f))).toBe(true);
+		expect(findings(parse(odd), odd).some((f) => f.code === 'malformed-line')).toBe(true);
 	});
 
 	it('does not absorb a hand-written checklist item as an issue', () => {
@@ -2561,7 +2575,7 @@ describe('T10 prefixed id patterns round-trip, hyphens included', () => {
 		const prose = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Real issue.\n\n- [ ] TODO-1: buy milk\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
 		const doc = parse(prose);
 		expect(doc.sections.get('Issues')!.map((i) => i.id)).toEqual(['001']);
-		expect(doctorFindings(doc, prose).some((f) => /malformed line/.test(f))).toBe(true);
+		expect(findings(doc, prose).some((f) => f.code === 'malformed-line')).toBe(true);
 	});
 
 	it('a foreign prefix stays malformed even when it looks like an id', () => {
@@ -2587,6 +2601,6 @@ describe('T10 prefixed id patterns round-trip, hyphens included', () => {
 
 	it('doctor flags an unparseable id line — the damage is at least detectable', () => {
 		const broken = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] no-digits: Bad.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
-		expect(doctorFindings(parse(broken), broken).some((f) => /malformed line/.test(f))).toBe(true);
+		expect(findings(parse(broken), broken).some((f) => f.code === 'malformed-line')).toBe(true);
 	});
 });

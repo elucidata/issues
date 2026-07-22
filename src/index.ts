@@ -445,7 +445,7 @@ export function cmdNote(doc: Doc, idInput: string, text: string): string {
 /**
  * `block <id> --by <blocker>` — add one blocker (§5 decision 3). Self-reference is
  * the one hard **reject**; unknown-blocker / cycle are warn-but-write (surfaced by
- * the caller via `graphWarnings`). Re-blocking an existing edge is an idempotent no-op.
+ * the caller via `findings`). Re-blocking an existing edge is an idempotent no-op.
  */
 export function cmdBlock(doc: Doc, idInput: string, byInput: string): string {
 	const { issue } = requireIssue(doc, idInput);
@@ -710,13 +710,6 @@ export function paint(text: string, style: AnsiStyle | AnsiStyle[] | null, color
 export interface ShowOptions {
 	children?: boolean;
 	quiet?: boolean; // -q: drop this issue's §3 advisories from the dossier (decision 8)
-}
-
-// The §3 advisories that name a given issue — the write-time / dossier subset of
-// `graphWarnings` (decision 8). The id is normalized so a raw or padded input matches.
-function warningsFor(doc: Doc, idInput: string): string[] {
-	const id = normalizeId(idInput, doc.pattern);
-	return graphWarnings(doc).filter((w) => w.includes(id));
 }
 
 /**
@@ -1036,69 +1029,6 @@ export function isBlocked(doc: Doc, issue: Issue): boolean {
 	if (!issue.blockedBy.length) return false;
 	const open = openIdSet(doc);
 	return blockerIds(doc, issue).some((b) => open.has(b));
-}
-
-/**
- * The §3 advisory warnings, derived read-time as the graph is walked over the open
- * `Issues` section. Every anomaly fails open (§3.4 / §4.6) — these change nothing
- * about frontier membership, they only inform. Five kinds:
- *   · self-reference     — `A blocked-by A`: edge ignored (§3.1)
- *   · dangling blocker   — id found nowhere: fails open (§3.1)
- *   · won't-fix blocker  — gate satisfied by a rejected issue (§3.1, advisory)
- *   · dangling part-of   — parent found nowhere: child renders top-level (§3.2)
- *   · cycle              — mutual deadlock: members stay blocked, never broken (§3.1)
- * Exported for focused unit tests and reused by the read commands.
- */
-export function graphWarnings(doc: Doc): string[] {
-	const warnings: string[] = [];
-	const all = allIdSet(doc);
-	const wontfix = idSet(doc, WONTFIX_SECTION);
-	for (const it of doc.sections.get(OPEN_SECTION) ?? []) {
-		for (const raw of it.blockedBy) {
-			const b = normalizeId(raw, doc.pattern);
-			if (b === it.id) {
-				warnings.push(`${it.id}: blocked-by ${b} is a self-reference — edge ignored`);
-			} else if (!all.has(b)) {
-				warnings.push(`${it.id}: blocked-by ${b} not found — fails open (does not block)`);
-			} else if (wontfix.has(b)) {
-				warnings.push(`${it.id}: blocker ${b} is won't-fix — gate satisfied by a rejected issue`);
-			}
-		}
-		if (it.partOf) {
-			const p = normalizeId(it.partOf, doc.pattern);
-			if (!all.has(p)) {
-				warnings.push(`${it.id}: part-of ${p} not found — rendered top-level`);
-			}
-		}
-	}
-	for (const cycle of detectCycles(doc)) {
-		warnings.push(`blocked-by cycle: ${cycle.join(' → ')} → ${cycle[0]} — members stay blocked`);
-	}
-	return warnings;
-}
-
-/**
- * The ADR 0007 file-format compat advisory. A file may carry an optional `schema:`
- * frontmatter key naming its format version. This build understands
- * `SUPPORTED_SCHEMA`; anything newer (or non-numeric) is surfaced as an advisory
- * and **never blocks** the read or write — the file is always yours to hand-edit.
- * An absent key is the original/legacy format: silent, never rejected. Dormant
- * until a breaking format change first writes the key.
- */
-export function compatWarnings(doc: Doc): string[] {
-	const entry = doc.frontmatter.find((e) => e.key === 'schema');
-	if (!entry) return []; // absent ⇒ legacy format ⇒ silent, never rejected
-	const raw = entry.raw.trim().replace(/^["']|["']$/g, '');
-	const n = Number(raw);
-	if (raw === '' || !Number.isFinite(n)) {
-		return [`schema:${raw} is not a recognized format version — proceeding, the file may not round-trip cleanly`];
-	}
-	if (n > SUPPORTED_SCHEMA) {
-		return [
-			`file declares schema ${n}; this build understands schema ${SUPPORTED_SCHEMA} — proceeding, it may not round-trip cleanly (upgrade \`issues\`)`
-		];
-	}
-	return []; // recognized (≤ supported) ⇒ silent
 }
 
 // Cycle detection (§3.1) over the open-section `blocked-by` graph — only edges to
@@ -1446,9 +1376,9 @@ const finding = (
 
 /**
  * Every anomaly the file carries at read time (ADR 0003 — nothing stored), as
- * structured findings. Folds the logic of `graphWarnings` + `doctorFindings` +
- * `compatWarnings` into one producer, with two behaviour changes the string
- * channel never had (ADR 0009 §6):
+ * structured findings. The single producer for every surface — graph advisories,
+ * declared-status mismatches, malformed lines, and `schema:` compat — with two
+ * behaviour changes the old string channel never had (ADR 0009 §6):
  *   · the graph walk **broadens to every section** — a dangling / self / won't-fix
  *     blocker or dangling part-of on a *closed* row now fires, not only on `Issues`;
  *   · **`deferred-blocker`** joins `wontfix-blocker` — a blocker in `Deferred`
@@ -1518,11 +1448,10 @@ function findMalformed(doc: Doc, text: string): Finding[] {
 	return out;
 }
 
-// The ADR 0007 `schema:` compat findings, as structured data. Supersedes the legacy
-// `compatWarnings` (now production-dead — no channel calls it after the write
-// migration; #42 deletes it): an absent key is legacy and silent; a non-numeric one
-// is `schema-unparseable`; one newer than this build is `schema-too-new`. Both
-// advisory, both file-level (`subjects: []`), so they speak on every read and write.
+// The ADR 0007 `schema:` compat findings, as structured data: an absent key is
+// legacy and silent; a non-numeric one is `schema-unparseable`; one newer than this
+// build is `schema-too-new`. Both advisory, both file-level (`subjects: []`), so
+// they speak on every read and write.
 function schemaFindings(doc: Doc): Finding[] {
 	const entry = doc.frontmatter.find((e) => e.key === 'schema');
 	if (!entry) return [];
@@ -1821,38 +1750,6 @@ function listView(doc: Doc, opts: ListOptions, filters: FrontierFilters): Set<st
 }
 
 // ── doctor (read-only linter, §5 decision 19) ────────────────────────────────
-// Every anomaly the file carries, in one flat list: the §3 graph advisories, any
-// status outside a declared `statuses:` set, and structurally malformed lines.
-export function doctorFindings(doc: Doc, text: string): string[] {
-	const out = [...graphWarnings(doc)];
-	const declared = declaredStatuses(doc);
-	if (declared)
-		for (const { issue } of allEntries(doc))
-			if (issue.status && !declared.has(issue.status))
-				out.push(`${issue.id}: status:${issue.status} is not in the declared statuses`);
-	out.push(...malformedLines(text, doc.pattern));
-	return out;
-}
-
-// Lines inside a section that are neither an issue line, an indented note, nor blank —
-// content the parser would silently drop. Scanned off the raw text (the model has
-// already discarded them).
-function malformedLines(text: string, pattern: string): string[] {
-	const issueRe = issueLineRe(pattern);
-	const out: string[] = [];
-	let inSection = false;
-	for (const line of text.split('\n')) {
-		if (/^## /.test(line)) {
-			inSection = true;
-			continue;
-		}
-		if (!inSection || line.trim() === '') continue;
-		if (issueRe.test(line) || /^\s+/.test(line)) continue;
-		out.push(`malformed line (not an issue or note): ${line.trim()}`);
-	}
-	return out;
-}
-
 /**
  * `doctor` — the grouped report (findings.md §5.1): findings grouped by severity
  * (errors first), prose tier headers, a footer tally. `No findings.` when clean.

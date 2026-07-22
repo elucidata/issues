@@ -1,6 +1,6 @@
 # Design spec — Findings: structured findings, severity tiers, scoped emission
 
-- **Status:** Locked (design closed; not yet built)
+- **Status:** Implemented (#38–#42; shipped in `0.4.0`)
 - **ADR:** [0009](../adr/0009-finding-model-severity-and-emission.md)
 - **Map:** [#32 The finding model](https://github.com/elucidata/issues/issues/32)
 - **Tickets:** [#33](https://github.com/elucidata/issues/issues/33),
@@ -410,37 +410,75 @@ produces **no code** — the boxes below are the handoff to a set of `ready-for-
 exactly as [`terminal-output.md`](terminal-output.md) §9 handed off to #27–#31. Tick each with
 the commit that carried it.
 
-- [ ] 1. **Core types & table** (`src/index.ts`) — `Severity`, `FindingCode`, `Finding`,
-      `FINDING_SEVERITY`, the `finding()` constructor (§1).
-- [ ] 2. **The producer** — `findings(doc, text)`: fold `graphWarnings`, `doctorFindings`,
+- [x] 1. **Core types & table** (`src/index.ts`) — `Severity`, `FindingCode`, `Finding`,
+      `FINDING_SEVERITY`, the `finding()` constructor (§1). — #38 (`0b01df2`)
+- [x] 2. **The producer** — `findings(doc, text)`: fold `graphWarnings`, `doctorFindings`,
       `compatWarnings` into one, **broaden the graph walk to every section** (§6), add
       `deferred-blocker` beside the `wontfix.has(b)` check (`idSet(doc, DEFER_SECTION)`), emit
-      `malformed-line` as a `subjects: []` finding with `line`.
-- [ ] 3. **The formatter** — `formatFinding(f, color)` at both densities (§4.1): inline for the
+      `malformed-line` as a `subjects: []` finding with `line`. — #38 (`0b01df2`); the
+      `closed-with-open-blocker` production was wired in #41 (`298dcee`), see §9.0.
+- [x] 3. **The formatter** — `formatFinding(f, color)` at both densities (§4.1): inline for the
       stderr/`show` channel, report for `doctor`. Glyphs `!`/`·`; colour `error`→red /
-      `advisory`→dim only where `color` is true.
-- [ ] 4. **Emission plumbing** — each read surfaces its `view` set to the dispatch
+      `advisory`→dim only where `color` is true. — #38 (`0b01df2`); gained a `density`
+      param (§9.0).
+- [x] 4. **Emission plumbing** — each read surfaces its `view` set to the dispatch
       (`tree` has `treeView().visible`; `list`/`next`/`ready` return or recompute rendered
       ids); the scope predicates (§3) at each call site; the pointer from the view complement.
-      `src/bin.ts` gains the blank-line separator and writes the pre-rendered block.
-- [ ] 5. **`-q`** — threshold at `error` and above on the stderr channel (§4.5); not applied to
-      `doctor`.
-- [ ] 6. **`doctor`** — `cmdDoctor(doc, text, color)`: group by severity, errors first, render
+      `src/bin.ts` gains the blank-line separator and writes the pre-rendered block. — reads in
+      #39 (`c7a6967`), writes in #41 (`298dcee`).
+- [x] 5. **`-q`** — threshold at `error` and above on the stderr channel (§4.5); not applied to
+      `doctor`. — reads #39 (`c7a6967`), `show` #40 (`8db1a47`).
+- [x] 6. **`doctor`** — `cmdDoctor(doc, text, color)`: group by severity, errors first, render
       each via `formatFinding` at report density, footer count, `No findings.` when empty.
       `cmdDoctorJson` → `{ findings: findings(doc, text) }` (`ok` removed). Exit code from
-      `findings(...).some(f => f.severity === 'error')` in the shell (§5.3).
-- [ ] 7. **`show --json`** — `warnings: string[]` → `findings: Finding[]` (§5.2).
-- [ ] 8. **Tests** — rewrite the prose-asserting tests (`/banana/`, `/malformed line/`,
+      `findings(...).some(f => f.severity === 'error')` in the shell (§5.3). — #38 (`0b01df2`).
+- [x] 7. **`show --json`** — `warnings: string[]` → `findings: Finding[]` (§5.2). — #40 (`8db1a47`);
+      `cmdShow`/`cmdShowJson` gained a trailing `text` param (§9.0).
+- [x] 8. **Tests** — rewrite the prose-asserting tests (`/banana/`, `/malformed line/`,
       `toEqual([])`) against `code`/`subjects`/`severity`; the emission scope on the reopen /
       `done` / `note` cases; the exit-code flip; the broadened walk firing on a closed row; the
-      pointer's self-extinguishing count.
-- [ ] 9. **Docs** (§9.2) — regenerate `--help`; update `skills/issues/SKILL.md` and `ReadMe.md`;
-      add the ADR 0005 / ADR 0008 amendment pointers if not already carried.
-- [ ] 10. **Version** — bump `package.json` to `0.4.0`.
-- [ ] 11. **Rebuild & commit `dist/`** per CLAUDE.md — consumers run `dist/` from GitHub.
-- [ ] 12. **Mark this spec `Implemented`** — flip Status, tick this checklist with commit refs,
+      pointer's self-extinguishing count. — across #38–#41; the last legacy-producer tests were
+      rewritten in #42.
+- [x] 9. **Docs** (§9.2) — regenerate `--help`; update `skills/issues/SKILL.md` and `ReadMe.md`;
+      add the ADR 0005 / ADR 0008 amendment pointers if not already carried. — `--help` in #38,
+      prose in #42.
+- [x] 10. **Version** — bump `package.json` to `0.4.0`. — #42.
+- [x] 11. **Rebuild & commit `dist/`** per CLAUDE.md — consumers run `dist/` from GitHub. —
+      rebuilt each slice #38–#41; final rebuild in #42.
+- [x] 12. **Mark this spec `Implemented`** — flip Status, tick this checklist with commit refs,
       record any deviations as a §9.0 **Implementation notes** subsection (the terminal-output
-      spec's item-10 lesson: record deviations rather than silently correcting the spec).
+      spec's item-10 lesson: record deviations rather than silently correcting the spec). — #42.
+
+### 9.0 Implementation notes — deviations from the spec
+
+The build followed the spec closely; the divergences worth recording (the terminal-output
+spec's item-10 lesson — record, don't silently rewrite):
+
+- **`formatFinding` gained a third `density` parameter.** §1 / §4.1 wrote the signature as
+  `formatFinding(f, color)` while describing two densities; the density is passed explicitly
+  rather than inferred, so the shipped signature is
+  `formatFinding(f, color, density: 'inline' | 'report' = 'inline')` — `inline` by default,
+  `doctor` passing `'report'`.
+- **`cmdShow` and `cmdShowJson` gained a trailing `text` parameter.** `findings(doc, text)`
+  needs the raw file for its file-level `malformed-line` scan (§1), so both `show` entry
+  points now thread `text` (defaulting to `''`): `cmdShow(doc, id, opts, render, text = '')`,
+  `cmdShowJson(doc, id, opts, text = '')`.
+- **`closed-with-open-blocker` production landed in #41, not #38.** The code is one of the
+  eleven from the start (§2.1), but its *emission* in `findings()` was wired alongside the
+  write migration (#41) — the slice that made `done`/`reopen` speak it (§3.2) — rather than in
+  the foundation slice. No behavioural difference in the shipped tool; a sequencing note.
+- **The blank-line separator lives in `src/bin.ts`.** As the checklist anticipated (item 4):
+  the core returns the pre-rendered finding block and the shell owns the one blank line and the
+  stderr write (§4.2), keeping the core stream-free.
+- **`show`'s discovery pointer also carries file-level errors with no dossier slot.** §3.3/§4.3
+  scope the pointer to out-of-view errors; the implementation additionally routes file-level
+  errors (`subjects: []`, e.g. a `malformed-line`) to the same stderr pointer channel, since a
+  file-level error has no issue row to fold into on stdout. A faithful extension of "errors
+  stay discoverable", not a contradiction.
+- **`warningsFor`, `advisories`, `edgeAdvisories` were removed incrementally**, ahead of #42:
+  `edgeAdvisories`/`advisories` fell in #39/#41 as their callers migrated, leaving only the four
+  named producers (`warningsFor`, `graphWarnings`, `compatWarnings`, `doctorFindings`) for #42
+  to delete once every surface was off them.
 
 ### 9.1 The 1 → 0 note
 

@@ -83,8 +83,15 @@ Beyond open/closed sections, issues carry inline metadata on the tail of the lin
   UDA; `label`/`unlabel` for labels.
 
 `next`/`ready` are always the **takeable frontier** (open ∩ unblocked ∩ unclaimed);
-filters only narrow it. Warnings are advisory — stderr, exit 0, silenceable with `-q`.
-`doctor` is the exception: it exits nonzero when it finds anything, so it is CI-gateable.
+filters only narrow it. Reads and writes derive **findings** in two tiers — **errors**
+(the file does not mean what it says: a dangling/self blocker, a cycle, a malformed
+line, an undeclared status) and **advisories** (nothing is wrong, but an assumption
+may not hold: a won't-fix/deferred blocker, a closed-with-open-blocker, a `schema:`
+mismatch). They ride stderr at exit 0; `-q` thresholds that channel at **error** — it
+drops advisories and keeps errors, it never empties the channel. `doctor` is the CI
+gate: it exits **1 iff any finding is an error**, otherwise 0 (so an advisory-only file
+is a green pass), and `doctor --json` is `{ "findings": [...] }` — read the exit code,
+or `.findings | any(.severity == "error")`, never a text scrape.
 
 The optional `schema:` frontmatter key is **reserved** for a future file-format
 version and is written only when the format actually changes (ADR 0007). A file with
@@ -114,7 +121,8 @@ Each issue is an object:
 - `next` → `{ "issue": <obj>|null, "reason": <string>|null }`.
 - `ready` → `{ "issues": [<obj>], "reason": <string>|null }`.
 - `show` → the object plus `parent`, `blockers` (each `{id,title,section,open,found}`),
-  `detail` (note lines), and `warnings`.
+  `detail` (note lines), and `findings` (an array of `Finding` objects — the anomalies
+  about this issue, each with `severity`, `code`, `subjects`, `mentions`).
 
 `blocked` and `takeable` are **derived at read time, never stored**. On `next`/`ready`,
 `reason` is `null` when the frontier is non-empty and otherwise diagnoses the empty state
@@ -136,7 +144,7 @@ issues tree                                   # containment forest (open by defa
 issues tree --all                             # every section
 issues tree --label parser                    # filtered; ancestors kept as scaffolding
 issues show 7 --children                      # dossier + subtree
-issues doctor                                 # lint; exit 1 on findings
+issues doctor                                 # lint; exit 1 on any error finding
 issues done 7                                 # -> Completed, datestamped (status voided)
 ```
 

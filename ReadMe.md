@@ -180,8 +180,11 @@ protection.
 unclaimed, in document order — the one query an agent runs to pick up work;
 filters only narrow it. Every read speaks `--json` (see the skill for the exact
 contract); graph state (`blocked`, `takeable`) is **derived at read time, never
-stored**. Warnings are advisory — stderr, exit 0, silenced with `-q`; `doctor` is
-the exception and exits nonzero on findings, so it's CI-gateable.
+stored**. Anomalies surface as **findings** in two tiers: **errors** (the file does
+not mean what it says) and **advisories** (nothing is wrong, but an assumption may not
+hold). They ride stderr at exit 0; `-q` thresholds that channel at **error** — dropping
+advisories, keeping errors. `doctor` is the CI gate: it exits **1 iff any finding is an
+error** (an advisory-only file passes green), and `doctor --json` is `{ findings }`.
 
 IDs are forgiving on input — `1`, `001`, `m1`, and `M001` all resolve to the
 same canonical id under an `M##`/`###` pattern.
