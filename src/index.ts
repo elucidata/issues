@@ -1682,6 +1682,44 @@ export function formatFinding(f: Finding, color: boolean, density: 'inline' | 'r
 	return paint(lines.join('\n'), style, color);
 }
 
+// ── Read-time finding emission (findings.md §3, §4.2, §4.5) ───────────────────
+// A read speaks the findings scoped to what it *printed*. `view` is every id the
+// command put on screen (§3.1, scaffolding included); a finding is in scope when
+// it is file-level (`subjects: []`, always) or names a printed id. The matched
+// findings render as the stderr block (§4.2): errors first, two-space indent,
+// `!`/`·` glyphs, uncoloured inline density. One discovery pointer (§3.3) then
+// counts the *errors* about issues outside the view — self-extinguishing, errors
+// only, routed at `doctor`. `-q` thresholds the block at `error` and above (§4.5)
+// and never prunes the pointer, which is already errors-only. The result is the
+// `warnings: string[]` the shell writes to stderr, blank-line-separated from stdout.
+function readFindings(doc: Doc, text: string, view: Set<string>, quiet: boolean): string[] {
+	const inScope = (f: Finding): boolean =>
+		f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
+	const all = findings(doc, text);
+	const shown = all
+		.filter(inScope)
+		.filter((f) => !quiet || f.severity === 'error')
+		.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
+	const lines = shown.map((f) => `  ${formatFinding(f, false, 'inline')}`);
+	// The pointer counts errors about issues *outside* the view — file-level findings
+	// are always in scope, so a hidden error is one with subjects, none of them printed.
+	const hidden = all.filter((f) => f.severity === 'error' && !inScope(f)).length;
+	if (hidden)
+		lines.push(`  → ${hidden} error${hidden === 1 ? '' : 's'} elsewhere — run \`issues doctor\``);
+	return lines;
+}
+
+// The ids `list` puts on screen (§3.1) — every filtered issue across its sections,
+// walked with the exact section + filter vocabulary the render uses, so the finding
+// scope and the printed rows cannot drift.
+function listView(doc: Doc, opts: ListOptions, filters: FrontierFilters): Set<string> {
+	const view = new Set<string>();
+	for (const name of listSections(opts))
+		for (const it of doc.sections.get(name) ?? [])
+			if (listFilter(doc, it, filters)) view.add(it.id);
+	return view;
+}
+
 // ── doctor (read-only linter, §5 decision 19) ────────────────────────────────
 // Every anomaly the file carries, in one flat list: the §3 graph advisories, any
 // status outside a declared `statuses:` set, and structurally malformed lines.
@@ -1999,7 +2037,7 @@ export interface RunResult {
 	text: string; // resulting file contents (unchanged unless `mutated`)
 	output: string; // text to print to stdout
 	mutated: boolean; // whether the file should be written back
-	warnings: string[]; // advisory §3 messages — bin.ts prints to stderr, never mixed into `output`
+	warnings: string[]; // the stderr finding block (§4.2) — bin.ts prints to stderr, never mixed into `output`
 	exitCode?: number; // defaults to 0; `doctor` sets 1 on any error finding (the sole exception)
 }
 
@@ -2036,10 +2074,6 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 	const quiet = !!flags.quiet;
 	const wantJson = !!flags.json;
 	const jsonOut = (d: unknown): string => JSON.stringify(d, null, 2);
-	// The §3 advisories a graph-reading command surfaces to stderr, gated by `-q`.
-	// The ADR 0007 schema-compat advisory rides the same channel and leads, since a
-	// too-new file colours everything read below it.
-	const advisories = (): string[] => (quiet ? [] : [...compatWarnings(doc), ...graphWarnings(doc)]);
 	// Write-time advisories for an edge-touching mutation (§5 decision 8): only the
 	// warnings that name the issue whose edge just changed — plus the schema-compat
 	// advisory, so an older build writing a newer file always says so first.
@@ -2054,17 +2088,22 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 			const output = wantJson
 				? jsonOut(cmdListJson(doc, opts, filters))
 				: cmdList(doc, opts, filters, render);
-			return result({ text, mutated: false, output, warnings: advisories() });
+			const warnings = readFindings(doc, text, listView(doc, opts, filters), quiet);
+			return result({ text, mutated: false, output, warnings });
 		}
 		case 'next': {
 			const filters = readFilters(flags);
 			const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters, render);
-			return result({ text, mutated: false, output, warnings: advisories() });
+			// `next` prints at most one row — its view is the single takeable top (§3.1).
+			const top = frontier(doc, { ...filters, limit: undefined })[0];
+			const view = new Set(top ? [top.id] : []);
+			return result({ text, mutated: false, output, warnings: readFindings(doc, text, view, quiet) });
 		}
 		case 'ready': {
 			const filters = readFilters(flags);
 			const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters, render);
-			return result({ text, mutated: false, output, warnings: advisories() });
+			const view = new Set(frontier(doc, filters).map((it) => it.id));
+			return result({ text, mutated: false, output, warnings: readFindings(doc, text, view, quiet) });
 		}
 		case 'show': {
 			const id = need(1, 'id');
@@ -2075,12 +2114,15 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 			return result({ text, mutated: false, output });
 		}
 		case 'tree': {
+			const opts = readSections(flags);
+			const filters = readFilters(flags);
 			// `tree --json` is deliberately unfiltered — the machine forest is the whole
 			// forest, and §6's contract does not change here (§8).
-			const output = wantJson
-				? jsonOut(cmdTreeJson(doc))
-				: cmdTree(doc, readSections(flags), readFilters(flags), render);
-			return result({ text, mutated: false, output, warnings: advisories() });
+			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, opts, filters, render);
+			// `tree` scopes to its visible rows — `matched ∪ scaffold` (§3.1), so an error
+			// on a scaffolding ancestor still speaks.
+			const warnings = readFindings(doc, text, treeView(doc, opts, filters).visible, quiet);
+			return result({ text, mutated: false, output, warnings });
 		}
 		case 'doctor': {
 			// The exit code is a threshold-shaped contract (findings.md §5.3): 1 iff any

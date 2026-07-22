@@ -761,14 +761,17 @@ describe('T3 frontier through the run seam (filters, warnings, exit code)', () =
 		expect(lines).toHaveLength(2);
 	});
 
-	it('surfaces §3 advisories through RunResult.warnings, exit 0', () => {
+	it('surfaces scoped findings through RunResult.warnings, exit 0', () => {
 		const r = run(GRAPH, ['ready']);
 		expect(r.exitCode ?? 0).toBe(0);
 		expect(r.warnings.length).toBeGreaterThan(0);
-		expect(r.warnings.some((w) => /self-ref/i.test(w))).toBe(true);
-		expect(r.warnings.some((w) => /cycle/i.test(w))).toBe(true);
-		// Warnings never leak into stdout output.
-		expect(r.output).not.toMatch(/self-ref|cycle/i);
+		// ready's view is the takeable frontier {001,002,003,004}; the 005↔006 cycle is
+		// out of that view, so it rides the pointer, not the block.
+		expect(r.warnings.some((w) => /self-reference/.test(w))).toBe(true);
+		expect(r.warnings.some((w) => /1 error elsewhere — run `issues doctor`/.test(w))).toBe(true);
+		expect(r.warnings.every((w) => !/dependency cycle/.test(w))).toBe(true);
+		// Findings never leak into stdout output.
+		expect(r.output).not.toMatch(/self-reference|elsewhere/);
 	});
 
 	it('next carries the same warnings', () => {
@@ -1244,9 +1247,14 @@ describe('T4 advisories, quiet, and exit codes (§5 decisions 8, 10)', () => {
 		expect(run(GRAPH, ['tree']).warnings.length).toBeGreaterThan(0);
 	});
 
-	it('-q / --quiet silences the advisory channel', () => {
-		expect(run(GRAPH, ['ready', '-q']).warnings).toEqual([]);
-		expect(run(GRAPH, ['ready', '--quiet']).warnings).toEqual([]);
+	it('-q / --quiet thresholds the channel at error — advisories drop, errors stay (§4.5)', () => {
+		// GRAPH ready's in-view findings are three errors (001/002/003) and one advisory
+		// (004 won't-fix). -q drops the advisory but keeps the errors and the pointer.
+		const r = run(GRAPH, ['ready', '-q']);
+		expect(r.warnings.every((w) => /^  [!→]/.test(w))).toBe(true); // no `·` advisory glyph
+		expect(r.warnings.some((w) => /self-reference/.test(w))).toBe(true);
+		expect(r.warnings.every((w) => !/won't-fix/.test(w))).toBe(true);
+		expect(run(GRAPH, ['ready', '--quiet']).warnings).toEqual(r.warnings);
 	});
 
 	it('-q drops the folded-in advisories from a show dossier too (decision 8)', () => {
@@ -1266,6 +1274,122 @@ describe('T4 advisories, quiet, and exit codes (§5 decisions 8, 10)', () => {
 		const out = run(SAMPLE, ['help']).output;
 		for (const verb of ['block', 'assign', 'label', 'set', 'tree', 'doctor']) {
 			expect(out).toContain(verb);
+		}
+	});
+});
+
+// ── Reads emit scoped findings (#39: findings.md §3, §4.2, §4.5) ──────────────
+describe('reads emit scoped findings — the stderr block, pointer, and -q threshold', () => {
+	// A parent (002) sits under a closed, dangling-blocker parent (001); a won't-fix
+	// blocker (010) unblocks 004; a stray line is malformed. Findings of every shape.
+	const SCOPED = `---
+next_id: 11
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 002: Child of a closed parent. part-of:001 #keep
+
+- [ ] 004: Unblocked by a won't-fix. blocked-by:010 #keep
+
+- [ ] 005: Dangling blocker, filtered out. blocked-by:999 #skip
+this line is not an issue or a note
+
+## Completed
+
+- [x] 001: Closed parent, bad blocker. blocked-by:998 (2026-01-01)
+
+## Deferred
+
+## Won't Fix
+
+- [ ] 010: Rejected. (2026-01-01)
+`;
+
+	it('list prints the finding block on stderr, errors first with !/· glyphs; stdout is clean', () => {
+		const r = run(SCOPED, ['list']); // default open view {002,004,005}
+		// The block is two-space-indented inline findings — no blank-line element here;
+		// the separator is the shell's job (bin.ts), off the RunResult contract.
+		const glyphs = r.warnings.filter((w) => /^  [!·]/.test(w));
+		expect(glyphs.length).toBeGreaterThan(0);
+		const firstAdvisory = glyphs.findIndex((w) => w.startsWith('  · '));
+		const lastError = glyphs.map((w) => w.startsWith('  ! ')).lastIndexOf(true);
+		expect(lastError).toBeLessThan(firstAdvisory); // every error precedes every advisory
+		// 005's dangling blocker is in the open view, so it is a block line, not the pointer.
+		expect(r.warnings.some((w) => /005 {2}blocked-by 999 not found/.test(w))).toBe(true);
+		// Findings never leak into stdout (the finding phrasing, not the row titles).
+		expect(r.output).not.toMatch(/blocked-by 999|is a self-reference|not an issue line/);
+	});
+
+	// A minimal fixture isolating the pointer: one visible issue, one off-screen error,
+	// one off-screen advisory. The pointer must count the error and ignore the advisory.
+	const POINTER = `---
+next_id: 11
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 001: Visible. #keep
+
+- [ ] 002: Hidden, dangling blocker. blocked-by:999 #skip
+
+- [ ] 003: Hidden, unblocked by a won't-fix. blocked-by:010 #skip
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+
+- [ ] 010: Rejected. (2026-01-01)
+`;
+
+	it('an off-screen error rides the pointer, not the block, and self-extinguishes', () => {
+		const r = run(POINTER, ['list', '--label', 'keep']); // view {001}
+		expect(r.warnings.some((w) => /→ 1 error elsewhere — run `issues doctor`/.test(w))).toBe(true);
+		expect(r.warnings.every((w) => !/999 not found/.test(w))).toBe(true); // 002 stays hidden
+		// Fixing the off-screen error removes the pointer entirely.
+		const fixed = POINTER.replace(' blocked-by:999', '');
+		expect(run(fixed, ['list', '--label', 'keep']).warnings.every((w) => !/elsewhere/.test(w))).toBe(true);
+	});
+
+	it('the pointer counts errors only — an off-screen advisory never nags', () => {
+		// view {001}: 002 (error) and 003 (won't-fix advisory) are both off-screen, yet the
+		// pointer reads "1 error", never 2 — the advisory does not add to the count.
+		const r = run(POINTER, ['list', '--label', 'keep']);
+		expect(r.warnings.some((w) => /→ 1 error elsewhere/.test(w))).toBe(true);
+		expect(r.warnings.every((w) => !/2 errors? elsewhere/.test(w))).toBe(true);
+	});
+
+	it('tree scopes to visible rows including scaffolding ancestors', () => {
+		// Default open tree: 002 matches; its closed parent 001 is scaffold, hence visible.
+		const r = run(SCOPED, ['tree']);
+		// 001's dangling blocker (998) is on a scaffold ancestor, so it speaks in the block…
+		expect(r.warnings.some((w) => /001 {2}blocked-by 998 not found/.test(w))).toBe(true);
+		// …whereas plain `list` (open only) never puts 001 on screen, so there it is hidden.
+		expect(run(SCOPED, ['list']).warnings.every((w) => !/998/.test(w))).toBe(true);
+	});
+
+	it('-q drops advisories but still prints errors, including a file-level malformed-line', () => {
+		const r = run(SCOPED, ['list', '-q']);
+		expect(r.warnings.some((w) => /ISSUES\.md:\d+ {2}not an issue line/.test(w))).toBe(true); // malformed error
+		expect(r.warnings.every((w) => !/^  · /.test(w))).toBe(true); // no advisory lines survive
+		// Without -q the won't-fix advisory about 004 is present; -q is what removed it.
+		expect(run(SCOPED, ['list']).warnings.some((w) => /004 {2}blocker 010 is won't-fix/.test(w))).toBe(true);
+	});
+
+	it('a file-level finding speaks on every read, whatever the view', () => {
+		// next shows at most one row, yet the malformed line (subjects:[]) still surfaces.
+		expect(run(SCOPED, ['next']).warnings.some((w) => /not an issue line/.test(w))).toBe(true);
+	});
+
+	it('a clean file emits an empty block on every read', () => {
+		for (const cmd of ['list', 'next', 'ready', 'tree']) {
+			expect(run(SAMPLE, [cmd]).warnings).toEqual([]);
 		}
 	});
 });

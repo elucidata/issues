@@ -1120,6 +1120,24 @@ function formatFinding(f, color, density = "inline") {
   return paint(lines.join(`
 `), style, color);
 }
+function readFindings(doc, text, view, quiet) {
+  const inScope = (f) => f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
+  const all = findings(doc, text);
+  const shown = all.filter(inScope).filter((f) => !quiet || f.severity === "error").sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
+  const lines = shown.map((f) => `  ${formatFinding(f, false, "inline")}`);
+  const hidden = all.filter((f) => f.severity === "error" && !inScope(f)).length;
+  if (hidden)
+    lines.push(`  → ${hidden} error${hidden === 1 ? "" : "s"} elsewhere — run \`issues doctor\``);
+  return lines;
+}
+function listView(doc, opts, filters) {
+  const view = new Set;
+  for (const name of listSections(opts))
+    for (const it of doc.sections.get(name) ?? [])
+      if (listFilter(doc, it, filters))
+        view.add(it.id);
+  return view;
+}
 function doctorFindings(doc, text) {
   const out = [...graphWarnings(doc)];
   const declared = declaredStatuses(doc);
@@ -1392,24 +1410,27 @@ function run(text, argv, render = DEFAULT_RENDER) {
   const quiet = !!flags.quiet;
   const wantJson = !!flags.json;
   const jsonOut = (d) => JSON.stringify(d, null, 2);
-  const advisories = () => quiet ? [] : [...compatWarnings(doc), ...graphWarnings(doc)];
   const edgeAdvisories = (id) => quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
   switch (cmd) {
     case "list": {
       const opts = readSections(flags);
       const filters = readFilters(flags);
       const output = wantJson ? jsonOut(cmdListJson(doc, opts, filters)) : cmdList(doc, opts, filters, render);
-      return result({ text, mutated: false, output, warnings: advisories() });
+      const warnings = readFindings(doc, text, listView(doc, opts, filters), quiet);
+      return result({ text, mutated: false, output, warnings });
     }
     case "next": {
       const filters = readFilters(flags);
       const output = wantJson ? jsonOut(cmdNextJson(doc, filters)) : cmdNext(doc, filters, render);
-      return result({ text, mutated: false, output, warnings: advisories() });
+      const top = frontier(doc, { ...filters, limit: undefined })[0];
+      const view = new Set(top ? [top.id] : []);
+      return result({ text, mutated: false, output, warnings: readFindings(doc, text, view, quiet) });
     }
     case "ready": {
       const filters = readFilters(flags);
       const output = wantJson ? jsonOut(cmdReadyJson(doc, filters)) : cmdReady(doc, filters, render);
-      return result({ text, mutated: false, output, warnings: advisories() });
+      const view = new Set(frontier(doc, filters).map((it) => it.id));
+      return result({ text, mutated: false, output, warnings: readFindings(doc, text, view, quiet) });
     }
     case "show": {
       const id = need(1, "id");
@@ -1418,8 +1439,11 @@ function run(text, argv, render = DEFAULT_RENDER) {
       return result({ text, mutated: false, output });
     }
     case "tree": {
-      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, readSections(flags), readFilters(flags), render);
-      return result({ text, mutated: false, output, warnings: advisories() });
+      const opts = readSections(flags);
+      const filters = readFilters(flags);
+      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, opts, filters, render);
+      const warnings = readFindings(doc, text, treeView(doc, opts, filters).visible, quiet);
+      return result({ text, mutated: false, output, warnings });
     }
     case "doctor": {
       const found = findings(doc, text);

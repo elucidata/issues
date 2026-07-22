@@ -67,8 +67,10 @@ function main(argv: string[]): void {
 		const result = run(text, argv, render);
 		if (result.mutated) writeFileSync(filePath, result.text);
 		if (result.output) process.stdout.write(result.output + '\n');
-		// Advisory §3 warnings ride their own channel — stderr, never mixed into
-		// stdout/JSON — and never block a write. `-q`/`--quiet` gating arrives later.
+		// Findings ride their own channel — stderr, never mixed into stdout/JSON — and
+		// never block a write. One blank line separates the block from stdout where both
+		// share a terminal (findings.md §4.2); on a redirect it is harmless.
+		if (result.warnings.length) process.stderr.write('\n');
 		for (const w of result.warnings) process.stderr.write(w + '\n');
 		if (result.exitCode) process.exit(result.exitCode);
 	} catch (err) {
