@@ -723,8 +723,9 @@ function warningsFor(doc: Doc, idInput: string): string[] {
 
 /**
  * `show <id>` — the full resolved dossier (§5 decision 17 / §4): status/assignee/labels,
- * relationships expanded with their target's title and section, the note body, this
- * issue's §3 warnings, and (with `--children`) its containment subtree. Its own render
+ * relationships expanded with their target's title and section, the note body, the
+ * findings about this issue (findings.md §4.3), and (with `--children`) its containment
+ * subtree. Its own render
  * path — terminal output is never double-spaced.
  *
  * `show` does **not** import the gutter: a gutter is a column device and a subject line
@@ -745,7 +746,8 @@ export function cmdShow(
 	doc: Doc,
 	idInput: string,
 	opts: ShowOptions = {},
-	render: RenderOptions = DEFAULT_RENDER
+	render: RenderOptions = DEFAULT_RENDER,
+	text = ''
 ): string {
 	const { section, issue } = requireIssue(doc, idInput);
 	const color = render.color && !render.plain;
@@ -771,7 +773,13 @@ export function cmdShow(
 			for (const k of kids) lines.push(...treeLines(doc, k, 1, render, undefined));
 		}
 	}
-	if (!opts.quiet) for (const w of warningsFor(doc, issue.id)) lines.push(`  ! ${w}`);
+	// Findings about the shown issue fold into the dossier on stdout (findings.md §4.3),
+	// coloured by severity (error→red, advisory→dim); `-q` thresholds them at error. The
+	// discovery pointer (out-of-view errors) is not the dossier's — it rides stderr from
+	// the dispatch, keeping `show`'s stdout exactly "the dossier for this issue".
+	const view = showView(doc, idInput, opts);
+	for (const f of showFindings(doc, text, view, !!opts.quiet))
+		lines.push(`  ${formatFinding(f, color, 'inline')}`);
 	return lines.join('\n');
 }
 
@@ -1696,17 +1704,75 @@ function readFindings(doc: Doc, text: string, view: Set<string>, quiet: boolean)
 	const inScope = (f: Finding): boolean =>
 		f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
 	const all = findings(doc, text);
-	const shown = all
-		.filter(inScope)
-		.filter((f) => !quiet || f.severity === 'error')
-		.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
-	const lines = shown.map((f) => `  ${formatFinding(f, false, 'inline')}`);
+	const lines = errorsFirst(all.filter(inScope), quiet).map(
+		(f) => `  ${formatFinding(f, false, 'inline')}`
+	);
 	// The pointer counts errors about issues *outside* the view — file-level findings
 	// are always in scope, so a hidden error is one with subjects, none of them printed.
 	const hidden = all.filter((f) => f.severity === 'error' && !inScope(f)).length;
-	if (hidden)
-		lines.push(`  → ${hidden} error${hidden === 1 ? '' : 's'} elsewhere — run \`issues doctor\``);
+	lines.push(...pointerLine(hidden));
 	return lines;
+}
+
+// The dossier/block finding order (findings.md §4.5, §4.2): `-q` thresholds at `error`
+// and above, then errors sort first. Shared by the stderr block (reads) and `show`'s
+// stdout dossier, so the threshold and ordering cannot drift between the two surfaces.
+function errorsFirst(fs: Finding[], quiet: boolean): Finding[] {
+	return fs
+		.filter((f) => !quiet || f.severity === 'error')
+		.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
+}
+
+// The one discovery-pointer line (findings.md §3.3): out-of-view **errors** only,
+// self-extinguishing, naming `doctor`. Empty when nothing is hidden. Shared by the
+// stderr block (reads) and `show`, whose pointer rides stderr while its findings ride
+// the stdout dossier.
+function pointerLine(hidden: number): string[] {
+	if (!hidden) return [];
+	return [`  → ${hidden} error${hidden === 1 ? '' : 's'} elsewhere — run \`issues doctor\``];
+}
+
+// ── `show` finding emission (findings.md §4.3) ────────────────────────────────
+// `show` folds the findings *about* the shown issue into its stdout dossier, coloured
+// by severity, while the out-of-view error pointer rides stderr. Its `view` is the
+// shown id plus, under `--children`, the ids of the subtree it prints (§3.1) — "printed
+// is in view", so a finding about a rendered child folds in beside its parent.
+function showView(doc: Doc, idInput: string, opts: ShowOptions): Set<string> {
+	const { issue } = requireIssue(doc, idInput);
+	const view = new Set<string>([issue.id]);
+	if (opts.children) collectDescendants(doc, issue.id, view);
+	return view;
+}
+
+function collectDescendants(doc: Doc, id: string, into: Set<string>): void {
+	for (const k of childrenOf(doc, id)) {
+		if (into.has(k.id)) continue;
+		into.add(k.id);
+		collectDescendants(doc, k.id, into);
+	}
+}
+
+// The findings folded into `show`'s dossier: those *about* an id in view (`subjects`
+// intersect the view). File-level findings (`subjects: []`) are deliberately excluded —
+// they are about the file, not this issue, and `show`'s stdout stays the dossier (their
+// errors are instead routed to the pointer below). `-q` thresholds at `error` and above
+// (§4.5 — `show` is the one command where `-q` is not stderr-only); errors sort first.
+function showFindings(doc: Doc, text: string, view: Set<string>, quiet: boolean): Finding[] {
+	return errorsFirst(
+		findings(doc, text).filter((f) => f.subjects.some((id) => view.has(id))),
+		quiet
+	);
+}
+
+// The `show` discovery-pointer count (§3.3): the errors the dossier does **not** show —
+// out-of-view subject errors *and* file-level errors, which the dossier excludes as not
+// about this issue. `show`'s only stderr channel is the pointer, so counting every
+// hidden error there keeps errors discoverable ("run `issues doctor`") — where the read
+// block instead displays file-level findings inline, so its complement omits them.
+function showPointer(doc: Doc, text: string, view: Set<string>): number {
+	return findings(doc, text).filter(
+		(f) => f.severity === 'error' && !f.subjects.some((id) => view.has(id))
+	).length;
 }
 
 // The ids `list` puts on screen (§3.1) — every filtered issue across its sections,
@@ -1861,35 +1927,41 @@ export function cmdTreeJson(doc: Doc) {
 	return treeJson(doc, rootsOf(doc));
 }
 
-export function cmdShowJson(doc: Doc, idInput: string, opts: ShowOptions = {}) {
+// A finding serialised for `--json` (findings.md §5.2): the full field set, with
+// `value`/`line` as `null` when absent, so the machine shape is stable regardless of
+// code. Shared by `show --json` (subject-scoped) and `doctor --json` (the whole file).
+function findingJson(f: Finding) {
+	return {
+		severity: f.severity,
+		code: f.code,
+		subjects: f.subjects,
+		mentions: f.mentions,
+		value: f.value ?? null,
+		line: f.line ?? null
+	};
+}
+
+export function cmdShowJson(doc: Doc, idInput: string, opts: ShowOptions = {}, text = '') {
 	const { section, issue } = requireIssue(doc, idInput);
 	const base = issueJson(doc, issue, section);
+	// `warnings: string[]` becomes structured `findings: Finding[]` (findings.md §5.2):
+	// the findings about this issue, `-q`-thresholded exactly like the human dossier.
+	const view = showView(doc, idInput, opts);
 	const result: Record<string, unknown> = {
 		...base,
 		parent: issue.partOf ? refJson(doc, issue.partOf) : null,
 		blockers: issue.blockedBy.map((b) => refJson(doc, b)),
 		detail: issue.detail,
-		warnings: opts.quiet ? [] : warningsFor(doc, issue.id)
+		findings: showFindings(doc, text, view, !!opts.quiet).map(findingJson)
 	};
 	if (opts.children) result.children = treeJson(doc, childrenOf(doc, issue.id));
 	return result;
 }
 
 // `doctor --json` — `{ findings: Finding[] }`, `ok` dropped (findings.md §5.2): once
-// the exit code is the gate, `ok` is a second encoding where drift lives. Every
-// finding carries the full field set (`value`/`line` as null when absent) so the
-// machine shape is stable regardless of code.
+// the exit code is the gate, `ok` is a second encoding where drift lives.
 export function cmdDoctorJson(doc: Doc, text: string) {
-	return {
-		findings: findings(doc, text).map((f) => ({
-			severity: f.severity,
-			code: f.code,
-			subjects: f.subjects,
-			mentions: f.mentions,
-			value: f.value ?? null,
-			line: f.line ?? null
-		}))
-	};
+	return { findings: findings(doc, text).map(findingJson) };
 }
 
 // ── CLI dispatch ───────────────────────────────────────────────────────────
@@ -2108,10 +2180,14 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 		case 'show': {
 			const id = need(1, 'id');
 			const opts: ShowOptions = { children: !!flags.children, quiet };
-			// `show` folds its issue's warnings into the dossier/JSON itself (§5 decision
-			// 17), so it does not also duplicate them on the stderr channel.
-			const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts, render);
-			return result({ text, mutated: false, output });
+			// `show` folds its findings into the dossier/JSON itself (findings.md §4.3),
+			// so they are not duplicated on stderr. Only the discovery pointer — errors
+			// about issues *outside* this dossier — rides the stderr channel.
+			const output = wantJson
+				? jsonOut(cmdShowJson(doc, id, opts, text))
+				: cmdShow(doc, id, opts, render, text);
+			const warnings = pointerLine(showPointer(doc, text, showView(doc, id, opts)));
+			return result({ text, mutated: false, output, warnings });
 		}
 		case 'tree': {
 			const opts = readSections(flags);

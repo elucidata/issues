@@ -1209,11 +1209,14 @@ describe('T4 --json read contract (§6)', () => {
 		expect(data.reason).toBeNull();
 	});
 
-	it('show --json expands relationships and derived state', () => {
+	it('show --json expands relationships and derived state, carries findings (not warnings)', () => {
 		const data = JSON.parse(run(ANNOTATED, ['show', '007', '--json']).output);
 		expect(data).toMatchObject({ id: '007', blocked: true, takeable: false });
 		expect(data.parent.id).toBe('002');
 		expect(data.blockers[0]).toMatchObject({ id: '004', open: true });
+		// §5.2: `warnings: string[]` is gone, replaced by structured `findings: Finding[]`.
+		expect(data.warnings).toBeUndefined();
+		expect(Array.isArray(data.findings)).toBe(true);
 	});
 
 	it('tree --json is a nested forest', () => {
@@ -1257,12 +1260,19 @@ describe('T4 advisories, quiet, and exit codes (§5 decisions 8, 10)', () => {
 		expect(run(GRAPH, ['ready', '--quiet']).warnings).toEqual(r.warnings);
 	});
 
-	it('-q drops the folded-in advisories from a show dossier too (decision 8)', () => {
-		// The `! …edge ignored` advisory line is silenced; the resolved blocked-by line
-		// (structural dossier content) is not — only the §3 warning channel is quieted.
-		expect(run(GRAPH, ['show', '001']).output).toMatch(/edge ignored/i); // 001 blocked-by:001
-		expect(run(GRAPH, ['show', '001', '-q']).output).not.toMatch(/edge ignored/i);
-		expect(JSON.parse(run(GRAPH, ['show', '001', '-q', '--json']).output).warnings).toEqual([]);
+	it('-q thresholds the show dossier at error — advisories drop, errors stay (§4.5)', () => {
+		// 004 blocked-by:010 (010 is Won't Fix) is a wontfix *advisory*; 001 blocked-by:001
+		// is a self-blocker *error*. -q drops the advisory from the dossier but keeps the
+		// error, and thresholds the --json findings identically (no `warnings` key).
+		const advisoryLine = /^  · 004 {2}blocker 010 is won't-fix/m; // the folded-in `·` line
+		const errorLine = /^  ! 001 {2}blocked-by 001 is a self-reference/m; // the folded-in `!` line
+		expect(run(GRAPH, ['show', '004']).output).toMatch(advisoryLine);
+		expect(run(GRAPH, ['show', '004', '-q']).output).not.toMatch(advisoryLine);
+		expect(run(GRAPH, ['show', '001', '-q']).output).toMatch(errorLine); // error stays
+		expect(JSON.parse(run(GRAPH, ['show', '004', '-q', '--json']).output).findings).toEqual([]);
+		const kept = JSON.parse(run(GRAPH, ['show', '001', '-q', '--json']).output);
+		expect(kept.warnings).toBeUndefined();
+		expect(kept.findings.map((f: { code: string }) => f.code)).toEqual(['self-blocker']);
 	});
 
 	it('an empty frontier is exit 0 (never an error, §4.5)', () => {
@@ -1275,6 +1285,56 @@ describe('T4 advisories, quiet, and exit codes (§5 decisions 8, 10)', () => {
 		for (const verb of ['block', 'assign', 'label', 'set', 'tree', 'doctor']) {
 			expect(out).toContain(verb);
 		}
+	});
+});
+
+// ── show folds findings into the dossier + pointer on stderr (#40: findings.md §4.3) ──
+describe('show folds findings into the dossier (stdout), pointer on stderr', () => {
+	it('renders findings about the shown id inside the dossier, errors as `!`', () => {
+		const out = run(GRAPH, ['show', '001']).output; // 001 blocked-by:001, self-blocker (error)
+		expect(out).toMatch(/self-reference/);
+		// the finding is a two-space-indented inline line inside the dossier, not on stderr
+		expect(out.split('\n').some((l) => /^  ! 001 {2}blocked-by 001/.test(l))).toBe(true);
+	});
+
+	it('colours dossier findings by severity; identical to the glyph form when uncoloured', () => {
+		const colored = run(GRAPH, ['show', '001'], { color: true, plain: false }).output;
+		const plain = run(GRAPH, ['show', '001'], { color: false, plain: true }).output;
+		const errLine = (s: string) => s.split('\n').find((l) => /edge ignored/.test(l))!; // the finding line
+		expect(errLine(colored)).toContain('\x1b[31m'); // error → red SGR
+		expect(errLine(plain)).not.toContain('\x1b['); // plain degrades to the bare glyph
+		// stripping ANSI from the coloured dossier reproduces the plain one exactly
+		expect(colored.replace(/\x1b\[[0-9;]*m/g, '')).toBe(plain);
+	});
+
+	it('an advisory folds in dim; error/advisory are the `!`/`·` glyphs uncoloured', () => {
+		const out = run(GRAPH, ['show', '004'], { color: false, plain: true }).output; // wontfix advisory
+		expect(out.split('\n').some((l) => /^  · 004 {2}blocker 010 is won't-fix/.test(l))).toBe(true);
+	});
+
+	it('the `→ N errors elsewhere` pointer rides stderr, never the stdout dossier', () => {
+		// showing 004 (its own finding is an advisory) with several errors about issues
+		// outside this dossier — the pointer counts those errors and sits on stderr only.
+		const r = run(GRAPH, ['show', '004']);
+		expect(r.warnings.some((w) => /^  → \d+ errors? elsewhere — run `issues doctor`$/.test(w))).toBe(
+			true
+		);
+		expect(r.output).not.toMatch(/elsewhere/);
+	});
+
+	it('a clean, in-scope-only issue emits no pointer', () => {
+		// SAMPLE has no findings at all, so nothing is elsewhere.
+		expect(run(SAMPLE, ['show', '005']).warnings).toEqual([]);
+	});
+
+	it('routes a file-level error (malformed line) to the pointer — not the dossier', () => {
+		// The dossier is scoped to this issue, so a `subjects: []` malformed-line error
+		// cannot fold in; show's only stderr channel is the pointer, so it counts there
+		// (keeping the error discoverable), while advisories about the file stay silent.
+		const bad = `---\nnext_id: 3\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: Clean.\nthis is a stray malformed line\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const r = run(bad, ['show', '001']);
+		expect(r.output).not.toMatch(/malformed|stray/); // never in the dossier
+		expect(r.warnings.some((w) => /^  → 1 error elsewhere — run `issues doctor`$/.test(w))).toBe(true);
 	});
 });
 

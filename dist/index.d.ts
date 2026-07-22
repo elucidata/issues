@@ -148,8 +148,9 @@ export interface ShowOptions {
 }
 /**
  * `show <id>` — the full resolved dossier (§5 decision 17 / §4): status/assignee/labels,
- * relationships expanded with their target's title and section, the note body, this
- * issue's §3 warnings, and (with `--children`) its containment subtree. Its own render
+ * relationships expanded with their target's title and section, the note body, the
+ * findings about this issue (findings.md §4.3), and (with `--children`) its containment
+ * subtree. Its own render
  * path — terminal output is never double-spaced.
  *
  * `show` does **not** import the gutter: a gutter is a column device and a subject line
@@ -166,7 +167,7 @@ export interface ShowOptions {
  * reintroduce the precedence collapse `state:` exists to escape. It dims when closed —
  * de-emphasis, not a state claim competing with the field.
  */
-export declare function cmdShow(doc: Doc, idInput: string, opts?: ShowOptions, render?: RenderOptions): string;
+export declare function cmdShow(doc: Doc, idInput: string, opts?: ShowOptions, render?: RenderOptions, text?: string): string;
 export interface ListOptions {
     all?: boolean;
     closed?: boolean;
@@ -330,7 +331,7 @@ export declare function cmdNextJson(doc: Doc, filters?: FrontierFilters): {
     reason: string | null;
 };
 export declare function cmdTreeJson(doc: Doc): unknown[];
-export declare function cmdShowJson(doc: Doc, idInput: string, opts?: ShowOptions): Record<string, unknown>;
+export declare function cmdShowJson(doc: Doc, idInput: string, opts?: ShowOptions, text?: string): Record<string, unknown>;
 export declare function cmdDoctorJson(doc: Doc, text: string): {
     findings: {
         severity: Severity;

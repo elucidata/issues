@@ -502,7 +502,7 @@ function warningsFor(doc, idInput) {
   const id = normalizeId(idInput, doc.pattern);
   return graphWarnings(doc).filter((w) => w.includes(id));
 }
-function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
+function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER, text = "") {
   const { section, issue } = requireIssue(doc, idInput);
   const color = render.color && !render.plain;
   const date = issue.date ? ` (${issue.date})` : "";
@@ -531,9 +531,9 @@ function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER) {
         lines.push(...treeLines(doc, k, 1, render, undefined));
     }
   }
-  if (!opts.quiet)
-    for (const w of warningsFor(doc, issue.id))
-      lines.push(`  ! ${w}`);
+  const view = showView(doc, idInput, opts);
+  for (const f of showFindings(doc, text, view, !!opts.quiet))
+    lines.push(`  ${formatFinding(f, color, "inline")}`);
   return lines.join(`
 `);
 }
@@ -1123,12 +1123,39 @@ function formatFinding(f, color, density = "inline") {
 function readFindings(doc, text, view, quiet) {
   const inScope = (f) => f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
   const all = findings(doc, text);
-  const shown = all.filter(inScope).filter((f) => !quiet || f.severity === "error").sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
-  const lines = shown.map((f) => `  ${formatFinding(f, false, "inline")}`);
+  const lines = errorsFirst(all.filter(inScope), quiet).map((f) => `  ${formatFinding(f, false, "inline")}`);
   const hidden = all.filter((f) => f.severity === "error" && !inScope(f)).length;
-  if (hidden)
-    lines.push(`  → ${hidden} error${hidden === 1 ? "" : "s"} elsewhere — run \`issues doctor\``);
+  lines.push(...pointerLine(hidden));
   return lines;
+}
+function errorsFirst(fs, quiet) {
+  return fs.filter((f) => !quiet || f.severity === "error").sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
+}
+function pointerLine(hidden) {
+  if (!hidden)
+    return [];
+  return [`  → ${hidden} error${hidden === 1 ? "" : "s"} elsewhere — run \`issues doctor\``];
+}
+function showView(doc, idInput, opts) {
+  const { issue } = requireIssue(doc, idInput);
+  const view = new Set([issue.id]);
+  if (opts.children)
+    collectDescendants(doc, issue.id, view);
+  return view;
+}
+function collectDescendants(doc, id, into) {
+  for (const k of childrenOf(doc, id)) {
+    if (into.has(k.id))
+      continue;
+    into.add(k.id);
+    collectDescendants(doc, k.id, into);
+  }
+}
+function showFindings(doc, text, view, quiet) {
+  return errorsFirst(findings(doc, text).filter((f) => f.subjects.some((id) => view.has(id))), quiet);
+}
+function showPointer(doc, text, view) {
+  return findings(doc, text).filter((f) => f.severity === "error" && !f.subjects.some((id) => view.has(id))).length;
 }
 function listView(doc, opts, filters) {
   const view = new Set;
@@ -1256,31 +1283,33 @@ function treeJson(doc, issues, seen = new Set) {
 function cmdTreeJson(doc) {
   return treeJson(doc, rootsOf(doc));
 }
-function cmdShowJson(doc, idInput, opts = {}) {
+function findingJson(f) {
+  return {
+    severity: f.severity,
+    code: f.code,
+    subjects: f.subjects,
+    mentions: f.mentions,
+    value: f.value ?? null,
+    line: f.line ?? null
+  };
+}
+function cmdShowJson(doc, idInput, opts = {}, text = "") {
   const { section, issue } = requireIssue(doc, idInput);
   const base = issueJson(doc, issue, section);
+  const view = showView(doc, idInput, opts);
   const result = {
     ...base,
     parent: issue.partOf ? refJson(doc, issue.partOf) : null,
     blockers: issue.blockedBy.map((b) => refJson(doc, b)),
     detail: issue.detail,
-    warnings: opts.quiet ? [] : warningsFor(doc, issue.id)
+    findings: showFindings(doc, text, view, !!opts.quiet).map(findingJson)
   };
   if (opts.children)
     result.children = treeJson(doc, childrenOf(doc, issue.id));
   return result;
 }
 function cmdDoctorJson(doc, text) {
-  return {
-    findings: findings(doc, text).map((f) => ({
-      severity: f.severity,
-      code: f.code,
-      subjects: f.subjects,
-      mentions: f.mentions,
-      value: f.value ?? null,
-      line: f.line ?? null
-    }))
-  };
+  return { findings: findings(doc, text).map(findingJson) };
 }
 var VALUE_FLAGS = new Set([
   "note",
@@ -1435,8 +1464,9 @@ function run(text, argv, render = DEFAULT_RENDER) {
     case "show": {
       const id = need(1, "id");
       const opts = { children: !!flags.children, quiet };
-      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts)) : cmdShow(doc, id, opts, render);
-      return result({ text, mutated: false, output });
+      const output = wantJson ? jsonOut(cmdShowJson(doc, id, opts, text)) : cmdShow(doc, id, opts, render, text);
+      const warnings = pointerLine(showPointer(doc, text, showView(doc, id, opts)));
+      return result({ text, mutated: false, output, warnings });
     }
     case "tree": {
       const opts = readSections(flags);
