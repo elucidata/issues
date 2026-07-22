@@ -1283,17 +1283,52 @@ function treeLines(
 	depth: number,
 	render: RenderOptions,
 	view?: TreeView,
-	seen = new Set<string>()
+	seen = new Set<string>(),
+	acc?: Set<string>
 ): string[] {
 	if (view && !view.visible.has(issue.id)) return [];
 	const indent = '  '.repeat(depth + 1);
 	if (seen.has(issue.id)) return [`${indent}${issue.id} (part-of cycle)`];
 	seen.add(issue.id);
+	acc?.add(issue.id); // record every id this forest actually renders as a row
 	const scaffold = view?.scaffold.has(issue.id);
 	const out = [compactRow(doc, issue, { indent, markers: true, scaffold }, render)];
 	for (const k of childrenOf(doc, issue.id))
-		out.push(...treeLines(doc, k, depth + 1, render, view, seen));
+		out.push(...treeLines(doc, k, depth + 1, render, view, seen, acc));
 	return out;
+}
+
+/**
+ * Render the containment forest once, returning both the text and the exact id set it
+ * put on screen. `scope` is populated by the same `treeLines` traversal that builds
+ * `output`, so the rows the reader sees and the rows the findings speak for are one
+ * computation — they cannot drift.
+ *
+ * An id argument roots the forest at one issue: show it (always — an explicitly named
+ * root survives the filter) and its descendants only. A missing id speaks in-band,
+ * mirroring `No issues.` rather than throwing like `show` (§3.2), and scopes findings to
+ * nothing since nothing is shown.
+ */
+function treeForest(
+	doc: Doc,
+	opts: ListOptions,
+	filters: FrontierFilters,
+	render: RenderOptions,
+	rootId?: string
+): { output: string; scope: Set<string> } {
+	const view = treeView(doc, opts, filters);
+	let roots: Issue[];
+	if (rootId !== undefined) {
+		const found = findIssue(doc, rootId);
+		if (!found) return { output: `Issue ${normalizeId(rootId, doc.pattern)} not found.`, scope: new Set() };
+		view.visible.add(found.issue.id);
+		roots = [found.issue];
+	} else roots = rootsOf(doc);
+	const seen = new Set<string>();
+	const scope = new Set<string>();
+	const lines: string[] = [];
+	for (const r of roots) lines.push(...treeLines(doc, r, 0, render, view, seen, scope));
+	return { output: lines.length ? lines.join('\n') : 'No issues.', scope };
 }
 
 /**
@@ -1305,20 +1340,17 @@ function treeLines(
  * Filtered by exactly `list`'s vocabulary — the same section flags and the same
  * predicate, so there is one filter language, not two (§3.1). **It defaults to open**;
  * `--all` restores every section. Non-matching ancestors are kept as scaffolding,
- * rendered in place and never moved (§3.2).
+ * rendered in place and never moved (§3.2). An optional `rootId` roots the forest at
+ * that issue (see `treeForest`).
  */
 export function cmdTree(
 	doc: Doc,
 	opts: ListOptions = {},
 	filters: FrontierFilters = {},
-	render: RenderOptions = DEFAULT_RENDER
+	render: RenderOptions = DEFAULT_RENDER,
+	rootId?: string
 ): string {
-	const view = treeView(doc, opts, filters);
-	const seen = new Set<string>();
-	const lines: string[] = [];
-	for (const r of rootsOf(doc)) lines.push(...treeLines(doc, r, 0, render, view, seen));
-	if (!lines.length) return 'No issues.';
-	return lines.join('\n');
+	return treeForest(doc, opts, filters, render, rootId).output;
 }
 
 // ── The finding model (ADR 0009 / design findings.md §1–§5) ──────────────────
@@ -1854,7 +1886,13 @@ function treeJson(doc: Doc, issues: Issue[], seen = new Set<string>()): unknown[
 	return out;
 }
 
-export function cmdTreeJson(doc: Doc) {
+export function cmdTreeJson(doc: Doc, rootId?: string) {
+	// An id roots the machine forest at one issue; a missing id is the empty forest —
+	// the stable machine shape for not-found. Still unfiltered, as always (§8).
+	if (rootId !== undefined) {
+		const found = findIssue(doc, rootId);
+		return found ? treeJson(doc, [found.issue]) : [];
+	}
 	return treeJson(doc, rootsOf(doc));
 }
 
@@ -2008,7 +2046,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
+  tree [id] [--all|--closed|--deferred|--wontfix] [filters]   containment forest (id roots the subtree; default: open)
   doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
@@ -2116,14 +2154,16 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 			return result({ text, mutated: false, output, warnings });
 		}
 		case 'tree': {
+			const rootId = arg(1); // optional — an id roots the forest at that issue
 			const opts = readSections(flags);
 			const filters = readFilters(flags);
-			// `tree --json` is deliberately unfiltered — the machine forest is the whole
-			// forest, and §6's contract does not change here (§8).
-			const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, opts, filters, render);
-			// `tree` scopes to its visible rows — `matched ∪ scaffold` (§3.1), so an error
-			// on a scaffolding ancestor still speaks.
-			const warnings = readFindings(doc, text, treeView(doc, opts, filters).visible, quiet);
+			// One render: `forest.scope` is the exact set of rows `forest.output` shows, so
+			// the findings speak for precisely what's on screen — `matched ∪ scaffold` (§3.1),
+			// or the rooted subtree only. `tree --json` is deliberately unfiltered (§8), but
+			// its advisories still scope to the human forest's visible rows.
+			const forest = treeForest(doc, opts, filters, render, rootId);
+			const output = wantJson ? jsonOut(cmdTreeJson(doc, rootId)) : forest.output;
+			const warnings = readFindings(doc, text, forest.scope, quiet);
 			return result({ text, mutated: false, output, warnings });
 		}
 		case 'doctor': {

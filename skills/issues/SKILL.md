@@ -36,7 +36,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
+  tree [id] [--all|--closed|--deferred|--wontfix] [filters]   containment forest (id roots the subtree; default: open)
   doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
@@ -143,6 +143,7 @@ issues next                                   # the topmost takeable issue
 issues tree                                   # containment forest (open by default)
 issues tree --all                             # every section
 issues tree --label parser                    # filtered; ancestors kept as scaffolding
+issues tree 7                                  # root the forest at #7 (its subtree only)
 issues show 7 --children                      # dossier + subtree
 issues doctor                                 # lint; exit 1 on any error finding
 issues done 7                                 # -> Completed, datestamped (status voided)

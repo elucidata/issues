@@ -823,29 +823,41 @@ function treeView(doc, opts, filters) {
   const scaffold = new Set([...visible].filter((id) => !matched.has(id)));
   return { visible, scaffold };
 }
-function treeLines(doc, issue, depth, render, view, seen = new Set) {
+function treeLines(doc, issue, depth, render, view, seen = new Set, acc) {
   if (view && !view.visible.has(issue.id))
     return [];
   const indent = "  ".repeat(depth + 1);
   if (seen.has(issue.id))
     return [`${indent}${issue.id} (part-of cycle)`];
   seen.add(issue.id);
+  acc?.add(issue.id);
   const scaffold = view?.scaffold.has(issue.id);
   const out = [compactRow(doc, issue, { indent, markers: true, scaffold }, render)];
   for (const k of childrenOf(doc, issue.id))
-    out.push(...treeLines(doc, k, depth + 1, render, view, seen));
+    out.push(...treeLines(doc, k, depth + 1, render, view, seen, acc));
   return out;
 }
-function cmdTree(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
+function treeForest(doc, opts, filters, render, rootId) {
   const view = treeView(doc, opts, filters);
+  let roots;
+  if (rootId !== undefined) {
+    const found = findIssue(doc, rootId);
+    if (!found)
+      return { output: `Issue ${normalizeId(rootId, doc.pattern)} not found.`, scope: new Set };
+    view.visible.add(found.issue.id);
+    roots = [found.issue];
+  } else
+    roots = rootsOf(doc);
   const seen = new Set;
+  const scope = new Set;
   const lines = [];
-  for (const r of rootsOf(doc))
-    lines.push(...treeLines(doc, r, 0, render, view, seen));
-  if (!lines.length)
-    return "No issues.";
-  return lines.join(`
-`);
+  for (const r of roots)
+    lines.push(...treeLines(doc, r, 0, render, view, seen, scope));
+  return { output: lines.length ? lines.join(`
+`) : "No issues.", scope };
+}
+function cmdTree(doc, opts = {}, filters = {}, render = DEFAULT_RENDER, rootId) {
+  return treeForest(doc, opts, filters, render, rootId).output;
 }
 var FINDING_SEVERITY = {
   "malformed-line": "error",
@@ -1213,7 +1225,11 @@ function treeJson(doc, issues, seen = new Set) {
   }
   return out;
 }
-function cmdTreeJson(doc) {
+function cmdTreeJson(doc, rootId) {
+  if (rootId !== undefined) {
+    const found = findIssue(doc, rootId);
+    return found ? treeJson(doc, [found.issue]) : [];
+  }
   return treeJson(doc, rootsOf(doc));
 }
 function findingJson(f) {
@@ -1325,7 +1341,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
+  tree [id] [--all|--closed|--deferred|--wontfix] [filters]   containment forest (id roots the subtree; default: open)
   doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
@@ -1401,10 +1417,12 @@ function run(text, argv, render = DEFAULT_RENDER) {
       return result({ text, mutated: false, output, warnings });
     }
     case "tree": {
+      const rootId = arg(1);
       const opts = readSections(flags);
       const filters = readFilters(flags);
-      const output = wantJson ? jsonOut(cmdTreeJson(doc)) : cmdTree(doc, opts, filters, render);
-      const warnings = readFindings(doc, text, treeView(doc, opts, filters).visible, quiet);
+      const forest = treeForest(doc, opts, filters, render, rootId);
+      const output = wantJson ? jsonOut(cmdTreeJson(doc, rootId)) : forest.output;
+      const warnings = readFindings(doc, text, forest.scope, quiet);
       return result({ text, mutated: false, output, warnings });
     }
     case "doctor": {

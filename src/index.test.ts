@@ -2252,6 +2252,84 @@ describe('T7 tree — what scaffolding does not touch (§3.2, §4.4)', () => {
 	});
 });
 
+// Two independent subtrees, each with a child carrying a dangling `blocked-by:`
+// (an error-severity finding subject to that child) — so rooting can be shown to
+// scope the advisories to exactly the subtree on screen.
+const T7B = `---
+next_id: 30
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 010: Subtree A root.
+
+- [ ] 011: A child, bad blocker. part-of:010 blocked-by:997
+
+- [ ] 020: Subtree B root.
+
+- [ ] 021: B child, bad blocker. part-of:020 blocked-by:998
+`;
+
+describe('T7 tree — an id roots the forest', () => {
+	it('shows the named issue and its descendants only, dropping sibling roots', () => {
+		const ids = idsIn(run(T7, ['tree', '001']).output);
+		for (const id of ['001', '002', '003', '004']) expect(ids).toContain(id);
+		for (const id of ['005', '006', '008', '009']) expect(ids).not.toContain(id);
+	});
+
+	it('normalizes the id argument to the doc pattern', () => {
+		// "1" and "001" root the same subtree under the ### pattern.
+		expect(idsIn(run(T7, ['tree', '1']).output)).toContain('001');
+	});
+
+	it('a missing id speaks in-band and does not fail — like No issues., not like show', () => {
+		const r = run(T7, ['tree', '999']);
+		expect(r.output).toBe('Issue 999 not found.');
+		expect(r.mutated).toBe(false);
+	});
+
+	it('filters still narrow inside the subtree', () => {
+		// 006 is a closed root; 007 is its closed child. Default open omits 007,
+		// --all restores it — the same filter language as an unrooted tree.
+		expect(idsIn(run(T7, ['tree', '006']).output)).not.toContain('007');
+		expect(idsIn(run(T7, ['tree', '006', '--all']).output)).toContain('007');
+	});
+
+	it('the named root is always shown, even when the filter would exclude it', () => {
+		// 008 is deferred with no children — nothing pulls it into a default-open tree,
+		// yet naming it as the root shows it.
+		expect(idsIn(run(T7, ['tree', '008']).output)).toEqual(['008']);
+	});
+
+	it('--json roots at the subtree, and a missing id is the empty forest', () => {
+		const rooted = JSON.parse(run(T7, ['tree', '001', '--json']).output);
+		expect(rooted).toHaveLength(1);
+		expect(rooted[0].id).toBe('001');
+		expect(rooted[0].children.map((c: { id: string }) => c.id)).toContain('002');
+		expect(JSON.parse(run(T7, ['tree', '999', '--json']).output)).toEqual([]);
+	});
+
+	it('the pure core returns the not-found line directly', () => {
+		expect(cmdTree(parse(T7), {}, {}, undefined, '999')).toBe('Issue 999 not found.');
+	});
+
+	it('findings speak only for the rendered subtree — not the sibling branch', () => {
+		// Rooted at A, only A's dangling-blocker (subject 011) is in scope; B's (021)
+		// is off-screen, so it is not named. Unrooted, both speak.
+		const wA = run(T7B, ['tree', '010']).warnings.join('\n');
+		expect(wA).toContain('011');
+		expect(wA).not.toContain('021');
+		const wB = run(T7B, ['tree', '020']).warnings.join('\n');
+		expect(wB).toContain('021');
+		expect(wB).not.toContain('011');
+		const wAll = run(T7B, ['tree']).warnings.join('\n');
+		expect(wAll).toContain('011');
+		expect(wAll).toContain('021');
+	});
+});
+
 // ── T8 — show: one-line header, unified state:, capitalized sections (§4) ────
 
 // The spec's own §4.5 example, rebuilt as a fixture so the dossier can be asserted

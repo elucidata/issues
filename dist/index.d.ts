@@ -217,9 +217,10 @@ export declare function cmdNext(doc: Doc, filters?: FrontierFilters, render?: Re
  * Filtered by exactly `list`'s vocabulary — the same section flags and the same
  * predicate, so there is one filter language, not two (§3.1). **It defaults to open**;
  * `--all` restores every section. Non-matching ancestors are kept as scaffolding,
- * rendered in place and never moved (§3.2).
+ * rendered in place and never moved (§3.2). An optional `rootId` roots the forest at
+ * that issue (see `treeForest`).
  */
-export declare function cmdTree(doc: Doc, opts?: ListOptions, filters?: FrontierFilters, render?: RenderOptions): string;
+export declare function cmdTree(doc: Doc, opts?: ListOptions, filters?: FrontierFilters, render?: RenderOptions, rootId?: string): string;
 /** Ordered severity scale (findings.md §1): error > (warning, reserved) > advisory. */
 export type Severity = 'error' | 'advisory';
 /** The eleven finding codes (findings.md §2.1). A union, not `string` — adding a
@@ -309,7 +310,7 @@ export declare function cmdNextJson(doc: Doc, filters?: FrontierFilters): {
     } | null;
     reason: string | null;
 };
-export declare function cmdTreeJson(doc: Doc): unknown[];
+export declare function cmdTreeJson(doc: Doc, rootId?: string): unknown[];
 export declare function cmdShowJson(doc: Doc, idInput: string, opts?: ShowOptions, text?: string): Record<string, unknown>;
 export declare function cmdDoctorJson(doc: Doc, text: string): {
     findings: {

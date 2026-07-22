@@ -97,7 +97,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   next   [filters]                                       the topmost takeable issue
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
-  tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
+  tree [id] [--all|--closed|--deferred|--wontfix] [filters]   containment forest (id roots the subtree; default: open)
   doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
