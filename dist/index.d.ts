@@ -94,9 +94,10 @@ export declare function cmdUnlabel(doc: Doc, idInput: string, names: string[]): 
 /**
  * `set <id> <key>:<value>` — replace a flat scalar (`status`) or any UDA (§5 decision
  * 6). Recognized relational keys route to their fields (a generic escape hatch); an
- * unknown key upserts a verbatim UDA. Returns any write-time advisories: `set status:`
- * on a closed issue, or a value outside a declared `statuses:` set — both warn-but-write
- * (§5 decisions 7, 15 / §5.3).
+ * unknown key upserts a verbatim UDA. Returns the one write-time advisory with no
+ * finding code: `set status:` on a **closed** issue (open-only per §2.2 / decision 15).
+ * An **undeclared** `status:` value is the `undeclared-status` finding — surfaced by
+ * `findings()` / `writeFindings`, not duplicated here (ADR 0009 §5, one producer).
  */
 export declare function cmdSet(doc: Doc, idInput: string, key: string, value: string): {
     message: string;

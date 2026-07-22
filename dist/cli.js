@@ -388,9 +388,6 @@ function cmdSet(doc, idInput, key, value) {
       issue.status = value;
       if (section !== OPEN_SECTION)
         warnings.push(`${issue.id}: status set on a closed issue — open-only per §2.2`);
-      const declared = declaredStatuses(doc);
-      if (declared && !declared.has(value))
-        warnings.push(`${issue.id}: status:${value} is not in the declared statuses`);
       break;
     }
     case "part-of":
@@ -503,10 +500,6 @@ function paint(text, style, color) {
     return text;
   const codes = (Array.isArray(style) ? style : [style]).map((s) => SGR[s]);
   return `\x1B[${codes.join(";")}m${text}${RESET}`;
-}
-function warningsFor(doc, idInput) {
-  const id = normalizeId(idInput, doc.pattern);
-  return graphWarnings(doc).filter((w) => w.includes(id));
 }
 function cmdShow(doc, idInput, opts = {}, render = DEFAULT_RENDER, text = "") {
   const { section, issue } = requireIssue(doc, idInput);
@@ -679,49 +672,6 @@ function isBlocked(doc, issue) {
     return false;
   const open = openIdSet(doc);
   return blockerIds(doc, issue).some((b) => open.has(b));
-}
-function graphWarnings(doc) {
-  const warnings = [];
-  const all = allIdSet(doc);
-  const wontfix = idSet(doc, WONTFIX_SECTION);
-  for (const it of doc.sections.get(OPEN_SECTION) ?? []) {
-    for (const raw of it.blockedBy) {
-      const b = normalizeId(raw, doc.pattern);
-      if (b === it.id) {
-        warnings.push(`${it.id}: blocked-by ${b} is a self-reference — edge ignored`);
-      } else if (!all.has(b)) {
-        warnings.push(`${it.id}: blocked-by ${b} not found — fails open (does not block)`);
-      } else if (wontfix.has(b)) {
-        warnings.push(`${it.id}: blocker ${b} is won't-fix — gate satisfied by a rejected issue`);
-      }
-    }
-    if (it.partOf) {
-      const p = normalizeId(it.partOf, doc.pattern);
-      if (!all.has(p)) {
-        warnings.push(`${it.id}: part-of ${p} not found — rendered top-level`);
-      }
-    }
-  }
-  for (const cycle of detectCycles(doc)) {
-    warnings.push(`blocked-by cycle: ${cycle.join(" → ")} → ${cycle[0]} — members stay blocked`);
-  }
-  return warnings;
-}
-function compatWarnings(doc) {
-  const entry = doc.frontmatter.find((e) => e.key === "schema");
-  if (!entry)
-    return [];
-  const raw = entry.raw.trim().replace(/^["']|["']$/g, "");
-  const n = Number(raw);
-  if (raw === "" || !Number.isFinite(n)) {
-    return [`schema:${raw} is not a recognized format version — proceeding, the file may not round-trip cleanly`];
-  }
-  if (n > SUPPORTED_SCHEMA) {
-    return [
-      `file declares schema ${n}; this build understands schema ${SUPPORTED_SCHEMA} — proceeding, it may not round-trip cleanly (upgrade \`issues\`)`
-    ];
-  }
-  return [];
 }
 function detectCycles(doc) {
   const openIds = openIdSet(doc);
@@ -920,9 +870,11 @@ var finding = (code, subjects, mentions = [], extra = {}) => ({ code, severity: 
 function findings(doc, text) {
   const out = [];
   const all = allIdSet(doc);
+  const open = openIdSet(doc);
   const wontfix = idSet(doc, WONTFIX_SECTION);
   const deferred = idSet(doc, DEFER_SECTION);
-  for (const { issue } of allEntries(doc)) {
+  for (const { section, issue } of allEntries(doc)) {
+    const closed = section !== OPEN_SECTION;
     for (const raw of issue.blockedBy) {
       const b = normalizeId(raw, doc.pattern);
       if (b === issue.id)
@@ -933,6 +885,8 @@ function findings(doc, text) {
         out.push(finding("wontfix-blocker", [issue.id], [b]));
       else if (deferred.has(b))
         out.push(finding("deferred-blocker", [issue.id], [b]));
+      else if (closed && open.has(b))
+        out.push(finding("closed-with-open-blocker", [issue.id], [b]));
     }
     if (issue.partOf) {
       const p = normalizeId(issue.partOf, doc.pattern);
@@ -1129,7 +1083,7 @@ function formatFinding(f, color, density = "inline") {
 function readFindings(doc, text, view, quiet) {
   const inScope = (f) => f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
   const all = findings(doc, text);
-  const lines = errorsFirst(all.filter(inScope), quiet).map((f) => `  ${formatFinding(f, false, "inline")}`);
+  const lines = findingBlock(all.filter(inScope), quiet);
   const hidden = all.filter((f) => f.severity === "error" && !inScope(f)).length;
   lines.push(...pointerLine(hidden));
   return lines;
@@ -1137,10 +1091,18 @@ function readFindings(doc, text, view, quiet) {
 function errorsFirst(fs, quiet) {
   return fs.filter((f) => !quiet || f.severity === "error").sort((a, b) => Number(b.severity === "error") - Number(a.severity === "error"));
 }
+function findingBlock(fs, quiet) {
+  return errorsFirst(fs, quiet).map((f) => `  ${formatFinding(f, false, "inline")}`);
+}
 function pointerLine(hidden) {
   if (!hidden)
     return [];
   return [`  → ${hidden} error${hidden === 1 ? "" : "s"} elsewhere — run \`issues doctor\``];
+}
+function writeFindings(doc, text, id, quiet) {
+  const norm = id === undefined ? undefined : normalizeId(id, doc.pattern);
+  const inScope = (f) => f.subjects.length === 0 || norm !== undefined && (f.subjects.includes(norm) || f.mentions.includes(norm));
+  return findingBlock(findings(doc, text).filter(inScope), quiet);
 }
 function showView(doc, idInput, opts) {
   const { issue } = requireIssue(doc, idInput);
@@ -1416,7 +1378,6 @@ function run(text, argv, render = DEFAULT_RENDER) {
   const quiet = !!flags.quiet;
   const wantJson = !!flags.json;
   const jsonOut = (d) => JSON.stringify(d, null, 2);
-  const edgeAdvisories = (id) => quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
   switch (cmd) {
     case "list": {
       const opts = readSections(flags);
@@ -1468,7 +1429,7 @@ function run(text, argv, render = DEFAULT_RENDER) {
         assignee: firstStr(flags.assignee),
         labels: commaList(flags.label)
       });
-      return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(newId) });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, newId, quiet) });
     }
     case "block": {
       const id = need(1, "id");
@@ -1476,27 +1437,28 @@ function run(text, argv, render = DEFAULT_RENDER) {
       if (!by)
         throw new Error("block: missing --by <blocker>");
       const msg = cmdBlock(doc, id, by);
-      return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(id) });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
     }
     case "unblock": {
-      const msg = cmdUnblock(doc, need(1, "id"), firstStr(flags.by));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      const id = need(1, "id");
+      const msg = cmdUnblock(doc, id, firstStr(flags.by));
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
     }
     case "assign": {
       const msg = cmdAssign(doc, need(1, "id"), need(2, "who"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     case "unassign": {
       const msg = cmdUnassign(doc, need(1, "id"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     case "label": {
       const msg = cmdLabel(doc, need(1, "id"), commaList(need(2, "name")));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     case "unlabel": {
       const msg = cmdUnlabel(doc, need(1, "id"), commaList(need(2, "name")));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     case "set": {
       const id = need(1, "id");
@@ -1509,29 +1471,32 @@ function run(text, argv, render = DEFAULT_RENDER) {
         text: serialize(doc),
         output: message,
         mutated: true,
-        warnings: quiet ? [] : warnings
+        warnings: [...quiet ? [] : warnings, ...writeFindings(doc, text, id, quiet)]
       });
     }
     case "unset": {
-      const msg = cmdUnset(doc, need(1, "id"), need(2, "key"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      const id = need(1, "id");
+      const msg = cmdUnset(doc, id, need(2, "key"));
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
     }
     case "done": {
+      const id = need(1, "id");
       const target = flags.defer ? DEFER_SECTION : flags.wontfix ? WONTFIX_SECTION : DONE_SECTION;
-      const msg = cmdDone(doc, need(1, "id"), target);
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      const msg = cmdDone(doc, id, target);
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
     }
     case "reopen": {
-      const msg = cmdReopen(doc, need(1, "id"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      const id = need(1, "id");
+      const msg = cmdReopen(doc, id);
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
     }
     case "edit": {
       const msg = cmdEdit(doc, need(1, "id"), need(2, "title"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     case "note": {
       const msg = cmdNote(doc, need(1, "id"), need(2, "text"));
-      return result({ text: serialize(doc), output: msg, mutated: true });
+      return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
     }
     default:
       throw new Error(`Unknown command: ${cmd}

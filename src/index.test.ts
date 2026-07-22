@@ -1145,6 +1145,54 @@ pattern: "###"
 		expect(f).toMatchObject({ severity: 'advisory', subjects: ['001'], mentions: ['020'] });
 	});
 
+	// A closed (Completed) issue whose own blocker is still open — the #26 case. The
+	// subject is the closed dependent; the mention is the open blocker (findings.md §2.1).
+	const CLOSED_OPEN = `---
+next_id: 42
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 041: The blocker, currently open.
+
+## Completed
+
+- [x] 039: Closed while still blocked. blocked-by:041 (2026-06-07)
+
+## Deferred
+
+## Won't Fix
+`;
+
+	it('emits closed-with-open-blocker for a closed issue whose blocker is open', () => {
+		const f = findings(parse(CLOSED_OPEN), CLOSED_OPEN).find(
+			(x) => x.code === 'closed-with-open-blocker'
+		);
+		expect(f).toMatchObject({ severity: 'advisory', subjects: ['039'], mentions: ['041'] });
+	});
+
+	it('stays silent when the closed issue\'s blocker is also closed', () => {
+		// 039 Completed, blocked-by 041 which is also Completed — the gate is satisfied
+		// by completion, so there is nothing to advise.
+		const bothDone = `---\nnext_id: 42\npattern: "###"\n---\n# T\n\n## Issues\n\n## Completed\n\n- [x] 039: Closed, blocker also done. blocked-by:041 (2026-06-07)\n\n- [x] 041: Also done. (2026-06-07)\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(
+			findings(parse(bothDone), bothDone).some((x) => x.code === 'closed-with-open-blocker')
+		).toBe(false);
+	});
+
+	it('is one hop, not a transitive closure — a closed issue blocked by an open one is the only subject', () => {
+		// 039 (Completed) blocked-by 041 (open); 038 (Completed) blocked-by 039 (closed).
+		// Only 039 names an OPEN blocker, so it is the sole closed-with-open-blocker subject —
+		// the advisory never walks past the direct edge (ADR 0009 "three truths").
+		const chain = `---\nnext_id: 42\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 041: Open blocker.\n\n## Completed\n\n- [x] 038: Closed, blocked by a closed one. blocked-by:039 (2026-06-07)\n\n- [x] 039: Closed, blocked by an open one. blocked-by:041 (2026-06-07)\n\n## Deferred\n\n## Won't Fix\n`;
+		const subjects = findings(parse(chain), chain)
+			.filter((x) => x.code === 'closed-with-open-blocker')
+			.map((x) => x.subjects.join(','));
+		expect(subjects).toEqual(['039']);
+	});
+
 	it('exits 0 on an advisories-only file — the declared 1→0 flip', () => {
 		const r = run(DEFERRED, ['doctor']);
 		expect(r.exitCode).toBe(0);
@@ -1451,6 +1499,127 @@ pattern: "###"
 		for (const cmd of ['list', 'next', 'ready', 'tree']) {
 			expect(run(SAMPLE, [cmd]).warnings).toEqual([]);
 		}
+	});
+});
+
+describe('writes emit scoped findings (findings.md §3.2)', () => {
+	// The #26 case: 039 (Completed) waited on 041; reopening 041 makes the standing
+	// advisory actionable, once, at the write where it becomes decidable.
+	const REOPEN = `---
+next_id: 42
+pattern: "###"
+---
+# T
+
+## Issues
+
+## Completed
+
+- [x] 039: Pin the detail-line grammar. blocked-by:041 (2026-06-07)
+
+- [x] 041: Audit the old format. (2026-06-07)
+
+## Deferred
+
+## Won't Fix
+`;
+
+	it('reopen 041 speaks the closed-with-open-blocker advisory naming 039', () => {
+		const r = run(REOPEN, ['reopen', '041']);
+		expect(r.warnings.some((w) => /^  · 039 {2}closed, but blocker 041 is open$/.test(w))).toBe(true);
+	});
+
+	it('done 039 speaks the same advisory — the symmetric path', () => {
+		// 039 open, blocked-by the open 041; closing 039 *creates* the flagged state and
+		// the same finding falls out of the rule at the other write (ADR 0009 §5).
+		const OPEN_BOTH = `---\nnext_id: 42\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 039: Pin the grammar. blocked-by:041\n\n- [ ] 041: Audit the format.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		const r = run(OPEN_BOTH, ['done', '039']);
+		expect(r.warnings.some((w) => /^  · 039 {2}closed, but blocker 041 is open$/.test(w))).toBe(true);
+	});
+
+	// 005 carries a dangling blocker (a scoped error *about* 005); a stray line is a
+	// file-level error; 001 is clean. The scope predicate is what these tests pin down.
+	const MIXED = `---
+next_id: 11
+pattern: "###"
+---
+# T
+
+## Issues
+
+- [ ] 001: Clean.
+
+- [ ] 005: Dangling blocker. blocked-by:999
+this line is not an issue or a note
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+
+	it('an edge-writing command (block) speaks the findings that name the id it touched', () => {
+		const r = run(MIXED, ['block', '005', '--by', '998']); // 005 now blocked-by 999,998
+		expect(r.warnings.some((w) => /005 {2}blocked-by 998 not found/.test(w))).toBe(true);
+		expect(r.warnings.some((w) => /005 {2}blocked-by 999 not found/.test(w))).toBe(true);
+	});
+
+	it('unblock / unset / add / done / reopen all emit their scoped findings', () => {
+		// add a new issue blocked by a missing id → its own dangling-blocker speaks.
+		const added = run(MIXED, ['add', 'New', '--blocked-by', '997']);
+		const newId = formatId(11, '###');
+		expect(added.warnings.some((w) => new RegExp(`${newId} {2}blocked-by 997 not found`).test(w))).toBe(true);
+		// unset clearing 005's blocker resolves its dangling error — nothing scoped remains.
+		const cleared = run(MIXED, ['unset', '005', 'blocked-by']);
+		expect(cleared.warnings.every((w) => !/999 not found/.test(w))).toBe(true);
+	});
+
+	it('a silent command (assign) does NOT speak a scoped finding, but file-level findings still speak', () => {
+		const r = run(MIXED, ['assign', '005', 'matt']);
+		// 005's dangling blocker is scoped to 005 — a silent write stays quiet about it…
+		expect(r.warnings.every((w) => !/999 not found/.test(w))).toBe(true);
+		// …yet the malformed line (subjects:[]) speaks, because the write executed it.
+		expect(r.warnings.some((w) => /ISSUES\.md:\d+ {2}not an issue line/.test(w))).toBe(true);
+	});
+
+	it('note on a file with a stray line still surfaces the malformed-line finding', () => {
+		const r = run(MIXED, ['note', '001', 'a fresh note']);
+		expect(r.warnings.some((w) => /ISSUES\.md:\d+ {2}not an issue line/.test(w))).toBe(true);
+	});
+
+	it('label and edit stay silent about scoped findings too', () => {
+		for (const argv of [['label', '005', 'x'], ['edit', '005', 'Renamed']]) {
+			expect(run(MIXED, argv).warnings.every((w) => !/999 not found/.test(w))).toBe(true);
+		}
+	});
+
+	it('a write to a clean issue on a clean file emits nothing', () => {
+		expect(run(SAMPLE, ['assign', '001', 'matt']).warnings).toEqual([]);
+		expect(run(SAMPLE, ['reopen', '006']).warnings).toEqual([]); // 006 Completed, no blockers
+	});
+
+	it('set keeps the status-on-closed advisory and surfaces undeclared status as a finding', () => {
+		// status-on-closed has no finding code — it stays a write-time advisory (decision 15);
+		// undeclared status is the `undeclared-status` finding, surfaced through writeFindings.
+		const T4C = `---\nnext_id: 3\npattern: "###"\nstatuses: ready, wip\n---\n# T\n\n## Issues\n\n- [ ] 001: Open.\n\n## Completed\n\n- [x] 002: Done. (2026-01-01)\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(run(T4C, ['set', '002', 'status:wip']).warnings.some((w) => /closed/.test(w))).toBe(true);
+		expect(run(T4C, ['set', '001', 'status:banana']).warnings.some((w) => /declared/.test(w))).toBe(true);
+	});
+
+	it('a newer-schema file surfaces the compat advisory on every write (file-level)', () => {
+		// The ADR 0007 schema advisory is `subjects: []`, so it rides `writeFindings` on
+		// both an emitting write (add) and a silent one (note) — the old edge-only path
+		// (add/block) is superseded by the file-level finding.
+		const NEWER = `---\nnext_id: 3\npattern: "###"\nschema: 99\n---\n# T\n\n## Issues\n\n- [ ] 001: A.\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
+		expect(run(NEWER, ['add', 'x']).warnings.some((w) => /declares schema 99/.test(w))).toBe(true);
+		expect(run(NEWER, ['note', '001', 'hi']).warnings.some((w) => /declares schema 99/.test(w))).toBe(true);
+	});
+
+	it('-q keeps a scoped error on a write but drops the advisory', () => {
+		// A dangling blocker is an error → survives -q; the reopen advisory is dropped.
+		expect(run(MIXED, ['block', '005', '--by', '998', '-q']).warnings.some((w) => /998 not found/.test(w))).toBe(true);
+		expect(run(REOPEN, ['reopen', '041', '-q']).warnings.every((w) => !/closed, but blocker/.test(w))).toBe(true);
 	});
 });
 

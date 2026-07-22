@@ -519,9 +519,10 @@ export function cmdUnlabel(doc: Doc, idInput: string, names: string[]): string {
 /**
  * `set <id> <key>:<value>` — replace a flat scalar (`status`) or any UDA (§5 decision
  * 6). Recognized relational keys route to their fields (a generic escape hatch); an
- * unknown key upserts a verbatim UDA. Returns any write-time advisories: `set status:`
- * on a closed issue, or a value outside a declared `statuses:` set — both warn-but-write
- * (§5 decisions 7, 15 / §5.3).
+ * unknown key upserts a verbatim UDA. Returns the one write-time advisory with no
+ * finding code: `set status:` on a **closed** issue (open-only per §2.2 / decision 15).
+ * An **undeclared** `status:` value is the `undeclared-status` finding — surfaced by
+ * `findings()` / `writeFindings`, not duplicated here (ADR 0009 §5, one producer).
  */
 export function cmdSet(
 	doc: Doc,
@@ -536,9 +537,6 @@ export function cmdSet(
 			issue.status = value;
 			if (section !== OPEN_SECTION)
 				warnings.push(`${issue.id}: status set on a closed issue — open-only per §2.2`);
-			const declared = declaredStatuses(doc);
-			if (declared && !declared.has(value))
-				warnings.push(`${issue.id}: status:${value} is not in the declared statuses`);
 			break;
 		}
 		case 'part-of':
@@ -1460,16 +1458,23 @@ const finding = (
 export function findings(doc: Doc, text: string): Finding[] {
 	const out: Finding[] = [];
 	const all = allIdSet(doc);
+	const open = openIdSet(doc);
 	const wontfix = idSet(doc, WONTFIX_SECTION);
 	const deferred = idSet(doc, DEFER_SECTION);
 	// Graph edges over **every** section (§6): the walk no longer stops at `Issues`.
-	for (const { issue } of allEntries(doc)) {
+	for (const { section, issue } of allEntries(doc)) {
+		const closed = section !== OPEN_SECTION;
 		for (const raw of issue.blockedBy) {
 			const b = normalizeId(raw, doc.pattern);
 			if (b === issue.id) out.push(finding('self-blocker', [issue.id], [issue.id]));
 			else if (!all.has(b)) out.push(finding('dangling-blocker', [issue.id], [b]));
 			else if (wontfix.has(b)) out.push(finding('wontfix-blocker', [issue.id], [b]));
 			else if (deferred.has(b)) out.push(finding('deferred-blocker', [issue.id], [b]));
+			// A closed issue whose own blocker is still open (findings.md §2.1 / #26): the
+			// gate it was closed under has reopened. ONE hop — the subject is this closed
+			// issue, the mention its open blocker; acting on it re-derives the next hop
+			// (ADR 0009 "three truths"), so this is never a transitive closure walk.
+			else if (closed && open.has(b)) out.push(finding('closed-with-open-blocker', [issue.id], [b]));
 		}
 		if (issue.partOf) {
 			const p = normalizeId(issue.partOf, doc.pattern);
@@ -1513,10 +1518,11 @@ function findMalformed(doc: Doc, text: string): Finding[] {
 	return out;
 }
 
-// The ADR 0007 `schema:` compat findings, as structured data. Mirrors
-// `compatWarnings` (which stays for the un-migrated channels): an absent key is
-// legacy and silent; a non-numeric one is `schema-unparseable`; one newer than this
-// build is `schema-too-new`. Both advisory, both file-level (`subjects: []`).
+// The ADR 0007 `schema:` compat findings, as structured data. Supersedes the legacy
+// `compatWarnings` (now production-dead — no channel calls it after the write
+// migration; #42 deletes it): an absent key is legacy and silent; a non-numeric one
+// is `schema-unparseable`; one newer than this build is `schema-too-new`. Both
+// advisory, both file-level (`subjects: []`), so they speak on every read and write.
 function schemaFindings(doc: Doc): Finding[] {
 	const entry = doc.frontmatter.find((e) => e.key === 'schema');
 	if (!entry) return [];
@@ -1704,9 +1710,7 @@ function readFindings(doc: Doc, text: string, view: Set<string>, quiet: boolean)
 	const inScope = (f: Finding): boolean =>
 		f.subjects.length === 0 || f.subjects.some((id) => view.has(id));
 	const all = findings(doc, text);
-	const lines = errorsFirst(all.filter(inScope), quiet).map(
-		(f) => `  ${formatFinding(f, false, 'inline')}`
-	);
+	const lines = findingBlock(all.filter(inScope), quiet);
 	// The pointer counts errors about issues *outside* the view — file-level findings
 	// are always in scope, so a hidden error is one with subjects, none of them printed.
 	const hidden = all.filter((f) => f.severity === 'error' && !inScope(f)).length;
@@ -1723,6 +1727,15 @@ function errorsFirst(fs: Finding[], quiet: boolean): Finding[] {
 		.sort((a, b) => Number(b.severity === 'error') - Number(a.severity === 'error'));
 }
 
+// The inline stderr block (findings.md §4.2): `-q`-thresholded, errors-first, each
+// finding on one two-space-indented uncoloured line. The shared body of the read
+// (`readFindings`) and write (`writeFindings`) channels, so the block's shape cannot
+// drift between them; each caller supplies its own scope filter and, for reads, the
+// discovery pointer.
+function findingBlock(fs: Finding[], quiet: boolean): string[] {
+	return errorsFirst(fs, quiet).map((f) => `  ${formatFinding(f, false, 'inline')}`);
+}
+
 // The one discovery-pointer line (findings.md §3.3): out-of-view **errors** only,
 // self-extinguishing, naming `doctor`. Empty when nothing is hidden. Shared by the
 // stderr block (reads) and `show`, whose pointer rides stderr while its findings ride
@@ -1730,6 +1743,27 @@ function errorsFirst(fs: Finding[], quiet: boolean): Finding[] {
 function pointerLine(hidden: number): string[] {
 	if (!hidden) return [];
 	return [`  → ${hidden} error${hidden === 1 ? '' : 's'} elsewhere — run \`issues doctor\``];
+}
+
+// ── Write-time finding emission (findings.md §3.2) ────────────────────────────
+// A write speaks its findings as the same inline stderr block a read does (errors
+// first, `!`/`·` glyphs, uncoloured), but scoped to the id it *touched* rather than
+// what it printed, and with no discovery pointer — a write is not an act of looking,
+// it already speaks about that id (§3.3). The scope is **names-this-id-at-all**
+// (`subjects ∪ mentions`), never mentions alone: matching an id wherever it appears is
+// what the old substring channel already did, and mention-only scoping would silence
+// the very edge a `block` just created (ADR 0009 §5).
+//
+// `id` is the touched id for an edge-writing command (`add`/`block`/…/`reopen`); a
+// silent command (`assign`/`label`/`edit`/`note`) passes `undefined`, so only the
+// file-level findings (`subjects: []`) every write executes speak — a `note` still
+// surfaces the malformed line it just dropped. `-q` thresholds at error (§4.5).
+function writeFindings(doc: Doc, text: string, id: string | undefined, quiet: boolean): string[] {
+	const norm = id === undefined ? undefined : normalizeId(id, doc.pattern);
+	const inScope = (f: Finding): boolean =>
+		f.subjects.length === 0 ||
+		(norm !== undefined && (f.subjects.includes(norm) || f.mentions.includes(norm)));
+	return findingBlock(findings(doc, text).filter(inScope), quiet);
 }
 
 // ── `show` finding emission (findings.md §4.3) ────────────────────────────────
@@ -2146,11 +2180,6 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 	const quiet = !!flags.quiet;
 	const wantJson = !!flags.json;
 	const jsonOut = (d: unknown): string => JSON.stringify(d, null, 2);
-	// Write-time advisories for an edge-touching mutation (§5 decision 8): only the
-	// warnings that name the issue whose edge just changed — plus the schema-compat
-	// advisory, so an older build writing a newer file always says so first.
-	const edgeAdvisories = (id: string): string[] =>
-		quiet ? [] : [...compatWarnings(doc), ...warningsFor(doc, id)];
 
 	switch (cmd) {
 		// ── Reads ────────────────────────────────────────────────────────────────
@@ -2211,6 +2240,12 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 		}
 
 		// ── Mutations ──────────────────────────────────────────────────────────────
+		// Every write rewrites the whole file, so its findings are re-derived over the
+		// mutated `doc` and the *original* `text` — the latter so a `malformed-line` the
+		// write just dropped still speaks (findings.md §3.2). An edge-writing command
+		// (add/block/unblock/set/unset/done/reopen) scopes to the id it touched; a silent
+		// command (assign/unassign/label/unlabel/edit/note) passes `undefined`, so only
+		// file-level findings speak.
 		case 'add': {
 			const note = typeof flags.note === 'string' ? flags.note : undefined;
 			const newId = formatId(doc.nextId, doc.pattern);
@@ -2221,68 +2256,75 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 				assignee: firstStr(flags.assignee),
 				labels: commaList(flags.label)
 			});
-			return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(newId) });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, newId, quiet) });
 		}
 		case 'block': {
 			const id = need(1, 'id');
 			const by = firstStr(flags.by);
 			if (!by) throw new Error('block: missing --by <blocker>');
 			const msg = cmdBlock(doc, id, by);
-			return result({ text: serialize(doc), output: msg, mutated: true, warnings: edgeAdvisories(id) });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
 		}
 		case 'unblock': {
-			const msg = cmdUnblock(doc, need(1, 'id'), firstStr(flags.by));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			const id = need(1, 'id');
+			const msg = cmdUnblock(doc, id, firstStr(flags.by));
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
 		}
 		case 'assign': {
 			const msg = cmdAssign(doc, need(1, 'id'), need(2, 'who'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		case 'unassign': {
 			const msg = cmdUnassign(doc, need(1, 'id'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		case 'label': {
 			const msg = cmdLabel(doc, need(1, 'id'), commaList(need(2, 'name')));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		case 'unlabel': {
 			const msg = cmdUnlabel(doc, need(1, 'id'), commaList(need(2, 'name')));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		case 'set': {
 			const id = need(1, 'id');
 			const kv = need(2, 'key:value');
 			const m = kv.match(/^([^:]+):([\s\S]*)$/);
 			if (!m) throw new Error(`set: expected <key>:<value>, got "${kv}"`);
+			// `cmdSet`'s remaining advisory is status-on-closed only — a write-time
+			// validation with no finding code (decision 15); undeclared-status is now a
+			// `findings()` code, so it rides `writeFindings` and is not double-reported.
 			const { message, warnings } = cmdSet(doc, id, m[1]!, m[2]!);
 			return result({
 				text: serialize(doc),
 				output: message,
 				mutated: true,
-				warnings: quiet ? [] : warnings
+				warnings: [...(quiet ? [] : warnings), ...writeFindings(doc, text, id, quiet)]
 			});
 		}
 		case 'unset': {
-			const msg = cmdUnset(doc, need(1, 'id'), need(2, 'key'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			const id = need(1, 'id');
+			const msg = cmdUnset(doc, id, need(2, 'key'));
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
 		}
 		case 'done': {
+			const id = need(1, 'id');
 			const target = flags.defer ? DEFER_SECTION : flags.wontfix ? WONTFIX_SECTION : DONE_SECTION;
-			const msg = cmdDone(doc, need(1, 'id'), target);
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			const msg = cmdDone(doc, id, target);
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
 		}
 		case 'reopen': {
-			const msg = cmdReopen(doc, need(1, 'id'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			const id = need(1, 'id');
+			const msg = cmdReopen(doc, id);
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, id, quiet) });
 		}
 		case 'edit': {
 			const msg = cmdEdit(doc, need(1, 'id'), need(2, 'title'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		case 'note': {
 			const msg = cmdNote(doc, need(1, 'id'), need(2, 'text'));
-			return result({ text: serialize(doc), output: msg, mutated: true });
+			return result({ text: serialize(doc), output: msg, mutated: true, warnings: writeFindings(doc, text, undefined, quiet) });
 		}
 		default:
 			throw new Error(`Unknown command: ${cmd}\n\n${HELP}`);
