@@ -98,7 +98,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
   tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
-  doctor                                                 lint the file (exit nonzero on findings)
+  doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
   add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]

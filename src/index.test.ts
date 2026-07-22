@@ -30,12 +30,15 @@ import {
 	cmdDoctor,
 	doctorFindings,
 	compatWarnings,
+	findings,
+	formatFinding,
+	FINDING_SEVERITY,
 	issueState,
 	STATE_GLYPHS,
 	paint,
 	run
 } from './index';
-import type { AnsiStyle } from './index';
+import type { AnsiStyle, Finding, FindingCode } from './index';
 import { readFileSync } from 'node:fs';
 
 // Deterministic datestamps for any code path that calls today().
@@ -1036,29 +1039,148 @@ describe('T4 reads — tree containment-only forest (§5 decision 13)', () => {
 	});
 });
 
-describe('T4 doctor — read-only linter (§5 decision 19)', () => {
-	it('reports every §3 anomaly and exits nonzero on findings', () => {
+describe('T4 doctor — the finding model report (findings.md §5)', () => {
+	// Asserted on `code`/`subjects`/`severity`, never finding prose (ADR 0009: the
+	// string channel was the bug — the model is the data).
+	const codesOf = (text: string): FindingCode[] => findings(parse(text), text).map((f) => f.code);
+
+	it('reports every graph anomaly and exits 1 while errors are present', () => {
 		const r = run(GRAPH, ['doctor']);
 		expect(r.exitCode).toBe(1);
-		expect(r.output).toMatch(/self-ref/i);
-		expect(r.output).toMatch(/cycle/i);
 		expect(r.mutated).toBe(false);
+		expect(codesOf(GRAPH)).toEqual(
+			expect.arrayContaining([
+				'self-blocker', 'dangling-blocker', 'dangling-part-of', 'cycle', 'wontfix-blocker'
+			])
+		);
 	});
 
-	it('exits 0 on a clean file', () => {
+	it('prints the grouped report — verbatim tier headers and a footer tally', () => {
+		const out = run(GRAPH, ['doctor']).output;
+		expect(out).toContain('ERRORS — the file does not mean what it says');
+		expect(out).toContain('ADVISORIES — nothing is wrong, but something you rely on may not hold');
+		// GRAPH: self/dangling-blocker/dangling-part-of + one cycle = 4 errors; one won't-fix.
+		expect(out).toMatch(/^4 errors, 1 advisory$/m);
+	});
+
+	it('is `No findings.` and exits 0 on a clean file', () => {
 		const r = run(SAMPLE, ['doctor']);
 		expect(r.exitCode).toBe(0);
-		expect(r.output).toMatch(/clean/i);
+		expect(r.output).toBe('No findings.');
 	});
 
-	it('flags a status outside a declared statuses: set', () => {
+	it('flags a status outside a declared statuses: set as an error carrying the value', () => {
 		const declared = `---\nnext_id: 2\npattern: "###"\nstatuses: ready, wip\n---\n# T\n\n## Issues\n\n- [ ] 001: A. status:banana\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
-		expect(doctorFindings(parse(declared), declared).some((f) => /banana/.test(f))).toBe(true);
+		const f = findings(parse(declared), declared).find((x) => x.code === 'undeclared-status');
+		expect(f).toMatchObject({ severity: 'error', subjects: ['001'], value: 'banana' });
 	});
 
-	it('flags a structurally malformed line', () => {
+	it('flags a malformed line as a file-level error located by line number', () => {
 		const bad = `---\nnext_id: 2\npattern: "###"\n---\n# T\n\n## Issues\n\n- [ ] 001: A.\nthis is not an issue line\n\n## Completed\n\n## Deferred\n\n## Won't Fix\n`;
-		expect(doctorFindings(parse(bad), bad).some((f) => /malformed/.test(f))).toBe(true);
+		const f = findings(parse(bad), bad).find((x) => x.code === 'malformed-line');
+		expect(f).toMatchObject({ severity: 'error', subjects: [] });
+		expect(f!.line).toBe(10);
+	});
+});
+
+// ── The finding model — producer, table, formatter (ADR 0009 / findings.md) ───
+describe('finding model — the broadened walk and severity tiers', () => {
+	// A dangling blocker on a Completed row, a self-blocker on a Deferred row, and a
+	// dangling part-of on a Won't Fix row — none in the open section. The old
+	// `graphWarnings` walk was blind to all three (§6).
+	const ALL_SECTIONS = `---
+next_id: 40
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+## Completed
+
+- [x] 010: Closed with a dangling blocker. blocked-by:999 (2026-06-07)
+
+## Deferred
+
+- [ ] 020: Deferred, blocks itself. blocked-by:020
+
+## Won't Fix
+
+- [ ] 030: Rejected orphan child. part-of:998 (2026-06-07)
+`;
+
+	it('fires graph errors on closed / deferred / won\'t-fix rows, not just Issues', () => {
+		const fs = findings(parse(ALL_SECTIONS), ALL_SECTIONS);
+		expect(fs.find((f) => f.code === 'dangling-blocker')).toMatchObject({ subjects: ['010'] });
+		expect(fs.find((f) => f.code === 'self-blocker')).toMatchObject({ subjects: ['020'] });
+		expect(fs.find((f) => f.code === 'dangling-part-of')).toMatchObject({ subjects: ['030'] });
+		expect(run(ALL_SECTIONS, ['doctor']).exitCode).toBe(1); // errors present
+	});
+
+	// A dependent whose only blocker sits in Deferred — an advisory nobody flags today.
+	const DEFERRED = `---
+next_id: 30
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Waiting on a postponed blocker. blocked-by:020
+
+## Completed
+
+## Deferred
+
+- [ ] 020: Postponed.
+
+## Won't Fix
+`;
+
+	it('adds `deferred-blocker` for a dependent whose blocker sits in Deferred', () => {
+		const f = findings(parse(DEFERRED), DEFERRED).find((x) => x.code === 'deferred-blocker');
+		expect(f).toMatchObject({ severity: 'advisory', subjects: ['001'], mentions: ['020'] });
+	});
+
+	it('exits 0 on an advisories-only file — the declared 1→0 flip', () => {
+		const r = run(DEFERRED, ['doctor']);
+		expect(r.exitCode).toBe(0);
+		expect(r.output).toContain('ADVISORIES — nothing is wrong, but something you rely on may not hold');
+		expect(r.output).not.toContain('ERRORS —');
+		expect(r.output).toMatch(/^0 errors, 1 advisory$/m);
+	});
+
+	it('classifies all eleven codes in FINDING_SEVERITY', () => {
+		expect(Object.keys(FINDING_SEVERITY)).toHaveLength(11);
+		expect(FINDING_SEVERITY['malformed-line']).toBe('error');
+		expect(FINDING_SEVERITY['deferred-blocker']).toBe('advisory');
+		expect(FINDING_SEVERITY['schema-too-new']).toBe('advisory');
+	});
+});
+
+describe('finding model — formatFinding at two densities (findings.md §4.1)', () => {
+	const danglingOf = (text: string): Finding =>
+		findings(parse(text), text).find((f) => f.code === 'dangling-blocker')!;
+
+	it('inline is a one-line `<glyph> <where>  <reason>`', () => {
+		const f = danglingOf(GRAPH); // 002 blocked-by:999
+		expect(formatFinding(f, false, 'inline')).toBe(
+			'! 002  blocked-by 999 not found — fails open (does not block)'
+		);
+	});
+
+	it('report is the three-part where · why · Fix form', () => {
+		const rep = formatFinding(danglingOf(GRAPH), false, 'report');
+		expect(rep).toContain('  002  blocked-by 999 — no such issue');
+		expect(rep).toContain('    Fix: correct the id, or drop `blocked-by:999` from the line.');
+	});
+
+	it('colours by severity only where color is true — error red, advisory dim', () => {
+		const err = danglingOf(GRAPH);
+		expect(formatFinding(err, false, 'inline')).not.toContain('\x1b[');
+		expect(formatFinding(err, true, 'inline')).toContain('\x1b[');
+		// advisory glyph is `·`, error glyph `!`
+		expect(formatFinding(err, false, 'inline').startsWith('!')).toBe(true);
 	});
 });
 
@@ -1102,10 +1224,17 @@ describe('T4 --json read contract (§6)', () => {
 		expect(data.every((i: { id: string; takeable: boolean }) => 'takeable' in i)).toBe(true);
 	});
 
-	it('doctor --json emits ok + findings', () => {
+	it('doctor --json is { findings: Finding[] } — ok dropped, no count fields', () => {
 		const data = JSON.parse(run(GRAPH, ['doctor', '--json']).output);
-		expect(data.ok).toBe(false);
+		expect(data.ok).toBeUndefined();
+		expect(Object.keys(data)).toEqual(['findings']);
 		expect(data.findings.length).toBeGreaterThan(0);
+		expect(data.findings[0]).toMatchObject({
+			severity: expect.any(String),
+			code: expect.any(String),
+			subjects: expect.any(Array),
+			mentions: expect.any(Array)
+		});
 	});
 });
 

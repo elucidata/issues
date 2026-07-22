@@ -897,6 +897,229 @@ function cmdTree(doc, opts = {}, filters = {}, render = DEFAULT_RENDER) {
   return lines.join(`
 `);
 }
+var FINDING_SEVERITY = {
+  "malformed-line": "error",
+  "dangling-blocker": "error",
+  "dangling-part-of": "error",
+  "self-blocker": "error",
+  cycle: "error",
+  "undeclared-status": "error",
+  "wontfix-blocker": "advisory",
+  "deferred-blocker": "advisory",
+  "closed-with-open-blocker": "advisory",
+  "schema-unparseable": "advisory",
+  "schema-too-new": "advisory"
+};
+var finding = (code, subjects, mentions = [], extra = {}) => ({ code, severity: FINDING_SEVERITY[code], subjects, mentions, ...extra });
+function findings(doc, text) {
+  const out = [];
+  const all = allIdSet(doc);
+  const wontfix = idSet(doc, WONTFIX_SECTION);
+  const deferred = idSet(doc, DEFER_SECTION);
+  for (const { issue } of allEntries(doc)) {
+    for (const raw of issue.blockedBy) {
+      const b = normalizeId(raw, doc.pattern);
+      if (b === issue.id)
+        out.push(finding("self-blocker", [issue.id], [issue.id]));
+      else if (!all.has(b))
+        out.push(finding("dangling-blocker", [issue.id], [b]));
+      else if (wontfix.has(b))
+        out.push(finding("wontfix-blocker", [issue.id], [b]));
+      else if (deferred.has(b))
+        out.push(finding("deferred-blocker", [issue.id], [b]));
+    }
+    if (issue.partOf) {
+      const p = normalizeId(issue.partOf, doc.pattern);
+      if (!all.has(p))
+        out.push(finding("dangling-part-of", [issue.id], [p]));
+    }
+  }
+  for (const cycle of detectCycles(doc))
+    out.push(finding("cycle", cycle, []));
+  const declared = declaredStatuses(doc);
+  if (declared) {
+    for (const { issue } of allEntries(doc))
+      if (issue.status && !declared.has(issue.status))
+        out.push(finding("undeclared-status", [issue.id], [], { value: issue.status }));
+  }
+  out.push(...findMalformed(doc, text));
+  out.push(...schemaFindings(doc));
+  return out;
+}
+function findMalformed(doc, text) {
+  const issueRe = issueLineRe(doc.pattern);
+  const out = [];
+  let inSection = false;
+  const lines = text.split(`
+`);
+  for (let i = 0;i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (/^## /.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (!inSection || line.trim() === "")
+      continue;
+    if (issueRe.test(line) || /^\s+/.test(line))
+      continue;
+    out.push(finding("malformed-line", [], [], { line: i + 1, value: line }));
+  }
+  return out;
+}
+function schemaFindings(doc) {
+  const entry = doc.frontmatter.find((e) => e.key === "schema");
+  if (!entry)
+    return [];
+  const raw = entry.raw.trim().replace(/^["']|["']$/g, "");
+  const n = Number(raw);
+  if (raw === "" || !Number.isFinite(n))
+    return [finding("schema-unparseable", [], [], { value: raw })];
+  if (n > SUPPORTED_SCHEMA)
+    return [finding("schema-too-new", [], [], { value: raw })];
+  return [];
+}
+function findingWhere(f) {
+  if (f.subjects.length)
+    return f.subjects.join(", ");
+  return f.line != null ? `ISSUES.md:${f.line}` : "ISSUES.md";
+}
+function findingProse(f) {
+  const s = f.subjects[0] ?? "";
+  const m = f.mentions[0] ?? "";
+  const v = f.value ?? "";
+  switch (f.code) {
+    case "malformed-line":
+      return {
+        headline: "malformed line — not an issue or an indented note",
+        why: [
+          `Line ${f.line} sits in a section but is neither an issue line`,
+          "nor an indented note, so the parser drops it on read."
+        ],
+        fix: "Fix: delete the line, or indent it to attach it as a note.",
+        inline: "not an issue line or an indented note — the parser drops it"
+      };
+    case "dangling-blocker":
+      return {
+        headline: `blocked-by ${m} — no such issue`,
+        why: [
+          `${m} is nowhere in this file, so the edge is ignored and`,
+          `${s} counts as unblocked.`
+        ],
+        fix: `Fix: correct the id, or drop \`blocked-by:${m}\` from the line.`,
+        inline: `blocked-by ${m} not found — fails open (does not block)`
+      };
+    case "dangling-part-of":
+      return {
+        headline: `part-of ${m} — no such issue`,
+        why: [
+          `${m} is nowhere in this file, so ${s} has no container and`,
+          "renders top-level."
+        ],
+        fix: `Fix: correct the id, or drop \`part-of:${m}\` from the line.`,
+        inline: `part-of ${m} not found — rendered top-level`
+      };
+    case "self-blocker":
+      return {
+        headline: "blocked-by itself",
+        why: [
+          `${s} lists itself as a blocker, so the edge is ignored.`,
+          "An issue cannot gate its own completion."
+        ],
+        fix: `Fix: drop \`blocked-by:${s}\` from the line.`,
+        inline: `blocked-by ${s} is a self-reference — edge ignored`
+      };
+    case "cycle":
+      return {
+        headline: "dependency cycle",
+        why: [
+          `${f.subjects.join(" → ")} → ${s}`,
+          "Each waits on the next, so none can ever become unblocked."
+        ],
+        fix: "Fix: remove one `blocked-by:` anywhere in the loop.",
+        inline: `dependency cycle: ${f.subjects.join(" → ")} → ${s} — members stay blocked`
+      };
+    case "undeclared-status":
+      return {
+        headline: `status:${v} — not in the declared statuses`,
+        why: [
+          `${s} carries a status the file's \`statuses:\` set does not`,
+          "declare, so the set claims something the file falsifies."
+        ],
+        fix: `Fix: correct the status, or add \`${v}\` to \`statuses:\`.`,
+        inline: `status:${v} is not in the declared statuses`
+      };
+    case "wontfix-blocker":
+      return {
+        headline: `blocker ${m} is won't-fix`,
+        why: [
+          `${s} is unblocked because ${m} was rejected, not because it`,
+          "was done — the gate is satisfied by a won't-fix."
+        ],
+        fix: `Fix: nothing required — confirm ${s} can proceed without it.`,
+        inline: `blocker ${m} is won't-fix — gate satisfied by a rejected issue`
+      };
+    case "deferred-blocker":
+      return {
+        headline: `blocker ${m} is deferred`,
+        why: [
+          `${s} is unblocked because ${m} was postponed, not because`,
+          "it was done. The work it waited on is still expected."
+        ],
+        fix: `Fix: nothing required — confirm ${s} can proceed without it.`,
+        inline: `blocker ${m} is deferred — unblocked by postponement, not completion`
+      };
+    case "closed-with-open-blocker":
+      return {
+        headline: `closed, but blocker ${m} is open`,
+        why: [
+          `${s} was completed, and ${m} — which it waited on — is not.`,
+          `Whether that undoes ${s} depends on why ${m} is open; the`,
+          "tool can't know."
+        ],
+        fix: `Fix: reopen ${s} if the work is genuinely undone.`,
+        inline: `closed, but blocker ${m} is open`
+      };
+    case "schema-unparseable":
+      return {
+        headline: `schema:${v} — not a recognized format version`,
+        why: [
+          "The `schema:` value is not numeric, so this build reads the",
+          "file as legacy format. It may not round-trip cleanly."
+        ],
+        fix: "Fix: set `schema:` to a version this build writes, or remove it.",
+        inline: `schema:${v} is not a recognized format version — may not round-trip`
+      };
+    case "schema-too-new":
+      return {
+        headline: `schema ${v} is newer than this build understands`,
+        why: [
+          `This build understands schema ${SUPPORTED_SCHEMA}; the file declares a`,
+          "newer one, so it may not round-trip cleanly."
+        ],
+        fix: `Fix: upgrade \`issues\` to a build that understands schema ${v}.`,
+        inline: `file declares schema ${v}; this build understands ${SUPPORTED_SCHEMA} — may not round-trip`
+      };
+    default: {
+      const _exhaustive = f.code;
+      throw new Error(`unhandled finding code: ${String(_exhaustive)}`);
+    }
+  }
+}
+function formatFinding(f, color, density = "inline") {
+  const prose = findingProse(f);
+  const style = f.severity === "error" ? "red" : "dim";
+  if (density === "inline") {
+    const glyph = f.severity === "error" ? "!" : "·";
+    return paint(`${glyph} ${findingWhere(f)}  ${prose.inline}`, style, color);
+  }
+  const lines = [
+    `  ${findingWhere(f)}  ${prose.headline}`,
+    ...prose.why.map((l) => `    ${l}`),
+    `    ${prose.fix}`
+  ];
+  return paint(lines.join(`
+`), style, color);
+}
 function doctorFindings(doc, text) {
   const out = [...graphWarnings(doc)];
   const declared = declaredStatuses(doc);
@@ -926,15 +1149,30 @@ function malformedLines(text, pattern) {
   }
   return out;
 }
-function cmdDoctor(doc, text) {
-  const findings = doctorFindings(doc, text);
-  if (!findings.length)
-    return "No issues found — clean.";
-  const lines = [`${findings.length} finding${findings.length === 1 ? "" : "s"}:`];
-  for (const f of findings)
-    lines.push(`  · ${f}`);
-  return lines.join(`
+function cmdDoctor(doc, text, color = false) {
+  const all = findings(doc, text);
+  if (!all.length)
+    return "No findings.";
+  const errors = all.filter((f) => f.severity === "error");
+  const advisories = all.filter((f) => f.severity === "advisory");
+  const blocks = [];
+  const group = (header, fs) => {
+    if (!fs.length)
+      return;
+    blocks.push(header, "");
+    for (const f of fs)
+      blocks.push(formatFinding(f, color, "report"), "");
+  };
+  group("ERRORS — the file does not mean what it says", errors);
+  group("ADVISORIES — nothing is wrong, but something you rely on may not hold", advisories);
+  blocks.push(doctorFooter(errors.length, advisories.length));
+  return blocks.join(`
 `);
+}
+function doctorFooter(errors, advisories) {
+  const e = `${errors} error${errors === 1 ? "" : "s"}`;
+  const a = `${advisories} advisor${advisories === 1 ? "y" : "ies"}`;
+  return `${e}, ${a}`;
 }
 function issueJson(doc, issue, section) {
   return {
@@ -1015,8 +1253,16 @@ function cmdShowJson(doc, idInput, opts = {}) {
   return result;
 }
 function cmdDoctorJson(doc, text) {
-  const findings = doctorFindings(doc, text);
-  return { ok: findings.length === 0, findings };
+  return {
+    findings: findings(doc, text).map((f) => ({
+      severity: f.severity,
+      code: f.code,
+      subjects: f.subjects,
+      mentions: f.mentions,
+      value: f.value ?? null,
+      line: f.line ?? null
+    }))
+  };
 }
 var VALUE_FLAGS = new Set([
   "note",
@@ -1100,7 +1346,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
   tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
-  doctor                                                 lint the file (exit nonzero on findings)
+  doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
   add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
@@ -1176,9 +1422,10 @@ function run(text, argv, render = DEFAULT_RENDER) {
       return result({ text, mutated: false, output, warnings: advisories() });
     }
     case "doctor": {
-      const findings = doctorFindings(doc, text);
-      const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text);
-      return result({ text, mutated: false, output, exitCode: findings.length ? 1 : 0 });
+      const found = findings(doc, text);
+      const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text, render.color);
+      const exitCode = found.some((f) => f.severity === "error") ? 1 : 0;
+      return result({ text, mutated: false, output, exitCode });
     }
     case "add": {
       const note = typeof flags.note === "string" ? flags.note : undefined;
@@ -1275,6 +1522,8 @@ export {
   graphWarnings,
   frontier,
   formatId,
+  formatFinding,
+  findings,
   findIssue,
   doctorFindings,
   compatWarnings,
@@ -1304,5 +1553,6 @@ export {
   cmdAssign,
   cmdAdd,
   STATE_GLYPHS,
+  FINDING_SEVERITY,
   DEFAULT_RENDER
 };

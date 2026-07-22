@@ -10,7 +10,7 @@
  *   next / ready [filters]           the takeable frontier (topmost / whole list)
  *   show <id> [--children]           full resolved dossier
  *   tree                             containment-only forest (blocking as a ⊘ annotation)
- *   doctor                           read-only linter (exits nonzero on findings)
+ *   doctor                           read-only linter (exit 1 on any error finding)
  *   add "<title>" [--note] [--part-of] [--blocked-by] [--status] [--assignee] [--label]
  *   block/unblock · assign/unassign · label/unlabel · set/unset   field mutations
  *   done <id> [--defer|--wontfix] · reopen · edit · note · help
@@ -239,9 +239,54 @@ export declare function cmdNext(doc: Doc, filters?: FrontierFilters, render?: Re
  * rendered in place and never moved (§3.2).
  */
 export declare function cmdTree(doc: Doc, opts?: ListOptions, filters?: FrontierFilters, render?: RenderOptions): string;
+/** Ordered severity scale (findings.md §1): error > (warning, reserved) > advisory. */
+export type Severity = 'error' | 'advisory';
+/** The eleven finding codes (findings.md §2.1). A union, not `string` — adding a
+ * member is non-breaking for consumers who read it. */
+export type FindingCode = 'malformed-line' | 'dangling-blocker' | 'dangling-part-of' | 'self-blocker' | 'cycle' | 'undeclared-status' | 'wontfix-blocker' | 'deferred-blocker' | 'closed-with-open-blocker' | 'schema-unparseable' | 'schema-too-new';
+export interface Finding {
+    severity: Severity;
+    code: FindingCode;
+    subjects: string[];
+    mentions: string[];
+    value?: string;
+    line?: number;
+}
+/**
+ * The severity of every code, in one exhaustive table (findings.md §1.1). Adding a
+ * `FindingCode` without classifying it here is a **compile error** — the same guard
+ * `STATE_GLYPHS: Record<IssueState, …>` gives the gutter.
+ */
+export declare const FINDING_SEVERITY: Record<FindingCode, Severity>;
+/**
+ * Every anomaly the file carries at read time (ADR 0003 — nothing stored), as
+ * structured findings. Folds the logic of `graphWarnings` + `doctorFindings` +
+ * `compatWarnings` into one producer, with two behaviour changes the string
+ * channel never had (ADR 0009 §6):
+ *   · the graph walk **broadens to every section** — a dangling / self / won't-fix
+ *     blocker or dangling part-of on a *closed* row now fires, not only on `Issues`;
+ *   · **`deferred-blocker`** joins `wontfix-blocker` — a blocker in `Deferred`
+ *     silently unblocks its dependents today, flagged by nothing.
+ * `text` is the raw file, needed only for the file-level `malformed-line` scan.
+ */
+export declare function findings(doc: Doc, text: string): Finding[];
+/**
+ * Render a finding at one of two densities (findings.md §4.1), coloured by severity
+ * only where `color` is true (ADR 0008: `error`→red, `advisory`→dim):
+ *   · **inline** (default) — one line `<glyph> <where>  <reason>`, for the stderr
+ *     block and `show`'s dossier (later tickets #39/#40);
+ *   · **report** — the three-part `doctor` form: where · why (authored prose) · `Fix:`.
+ * The core never wraps — report prose is authored short and split by hand.
+ */
+export declare function formatFinding(f: Finding, color: boolean, density?: 'inline' | 'report'): string;
 export declare function doctorFindings(doc: Doc, text: string): string[];
-/** `doctor` — human-readable grouped findings; exit code is the caller's job (§5 decision 19). */
-export declare function cmdDoctor(doc: Doc, text: string): string;
+/**
+ * `doctor` — the grouped report (findings.md §5.1): findings grouped by severity
+ * (errors first), prose tier headers, a footer tally. `No findings.` when clean.
+ * Findings ride stdout, so they colour by severity where `color` is true (§4.4).
+ * The exit code is the caller's job (§5.3).
+ */
+export declare function cmdDoctor(doc: Doc, text: string, color?: boolean): string;
 export declare function cmdListJson(doc: Doc, opts?: ListOptions, filters?: FrontierFilters): {
     id: string;
     title: string;
@@ -287,8 +332,14 @@ export declare function cmdNextJson(doc: Doc, filters?: FrontierFilters): {
 export declare function cmdTreeJson(doc: Doc): unknown[];
 export declare function cmdShowJson(doc: Doc, idInput: string, opts?: ShowOptions): Record<string, unknown>;
 export declare function cmdDoctorJson(doc: Doc, text: string): {
-    ok: boolean;
-    findings: string[];
+    findings: {
+        severity: Severity;
+        code: FindingCode;
+        subjects: string[];
+        mentions: string[];
+        value: string | null;
+        line: number | null;
+    }[];
 };
 export type FlagValue = string | boolean | string[];
 /**

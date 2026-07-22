@@ -10,7 +10,7 @@
  *   next / ready [filters]           the takeable frontier (topmost / whole list)
  *   show <id> [--children]           full resolved dossier
  *   tree                             containment-only forest (blocking as a ⊘ annotation)
- *   doctor                           read-only linter (exits nonzero on findings)
+ *   doctor                           read-only linter (exit 1 on any error finding)
  *   add "<title>" [--note] [--part-of] [--blocked-by] [--status] [--assignee] [--label]
  *   block/unblock · assign/unassign · label/unlabel · set/unset   field mutations
  *   done <id> [--defer|--wontfix] · reopen · edit · note · help
@@ -1385,6 +1385,303 @@ export function cmdTree(
 	return lines.join('\n');
 }
 
+// ── The finding model (ADR 0009 / design findings.md §1–§5) ──────────────────
+// A finding is structured data with a formatter, not a string: one producer
+// (`findings`) folds every read-time anomaly, and one formatter (`formatFinding`)
+// renders it at two densities. The three legacy string producers above stay in
+// place for the surfaces not yet migrated (tickets #39–#42).
+
+/** Ordered severity scale (findings.md §1): error > (warning, reserved) > advisory. */
+export type Severity = 'error' | 'advisory';
+
+/** The eleven finding codes (findings.md §2.1). A union, not `string` — adding a
+ * member is non-breaking for consumers who read it. */
+export type FindingCode =
+	| 'malformed-line' | 'dangling-blocker' | 'dangling-part-of' | 'self-blocker'
+	| 'cycle' | 'undeclared-status'
+	| 'wontfix-blocker' | 'deferred-blocker' | 'closed-with-open-blocker'
+	| 'schema-unparseable' | 'schema-too-new';
+
+export interface Finding {
+	severity: Severity;
+	code: FindingCode;
+	subjects: string[]; // 0 = the file · 1 = an issue · n = a knot
+	mentions: string[]; // implicated ids; write-time scope
+	value?: string; // the one non-id scalar some codes carry
+	line?: number; // file-level findings only
+}
+
+/**
+ * The severity of every code, in one exhaustive table (findings.md §1.1). Adding a
+ * `FindingCode` without classifying it here is a **compile error** — the same guard
+ * `STATE_GLYPHS: Record<IssueState, …>` gives the gutter.
+ */
+export const FINDING_SEVERITY: Record<FindingCode, Severity> = {
+	'malformed-line': 'error',
+	'dangling-blocker': 'error',
+	'dangling-part-of': 'error',
+	'self-blocker': 'error',
+	'cycle': 'error',
+	'undeclared-status': 'error',
+	'wontfix-blocker': 'advisory',
+	'deferred-blocker': 'advisory',
+	'closed-with-open-blocker': 'advisory',
+	'schema-unparseable': 'advisory',
+	'schema-too-new': 'advisory'
+};
+
+// Construct a finding, taking severity from the table so no site types it twice.
+const finding = (
+	code: FindingCode,
+	subjects: string[],
+	mentions: string[] = [],
+	extra: Partial<Pick<Finding, 'value' | 'line'>> = {}
+): Finding => ({ code, severity: FINDING_SEVERITY[code], subjects, mentions, ...extra });
+
+/**
+ * Every anomaly the file carries at read time (ADR 0003 — nothing stored), as
+ * structured findings. Folds the logic of `graphWarnings` + `doctorFindings` +
+ * `compatWarnings` into one producer, with two behaviour changes the string
+ * channel never had (ADR 0009 §6):
+ *   · the graph walk **broadens to every section** — a dangling / self / won't-fix
+ *     blocker or dangling part-of on a *closed* row now fires, not only on `Issues`;
+ *   · **`deferred-blocker`** joins `wontfix-blocker` — a blocker in `Deferred`
+ *     silently unblocks its dependents today, flagged by nothing.
+ * `text` is the raw file, needed only for the file-level `malformed-line` scan.
+ */
+export function findings(doc: Doc, text: string): Finding[] {
+	const out: Finding[] = [];
+	const all = allIdSet(doc);
+	const wontfix = idSet(doc, WONTFIX_SECTION);
+	const deferred = idSet(doc, DEFER_SECTION);
+	// Graph edges over **every** section (§6): the walk no longer stops at `Issues`.
+	for (const { issue } of allEntries(doc)) {
+		for (const raw of issue.blockedBy) {
+			const b = normalizeId(raw, doc.pattern);
+			if (b === issue.id) out.push(finding('self-blocker', [issue.id], [issue.id]));
+			else if (!all.has(b)) out.push(finding('dangling-blocker', [issue.id], [b]));
+			else if (wontfix.has(b)) out.push(finding('wontfix-blocker', [issue.id], [b]));
+			else if (deferred.has(b)) out.push(finding('deferred-blocker', [issue.id], [b]));
+		}
+		if (issue.partOf) {
+			const p = normalizeId(issue.partOf, doc.pattern);
+			if (!all.has(p)) out.push(finding('dangling-part-of', [issue.id], [p]));
+		}
+	}
+	// Cycles among still-open issues (a closed blocker satisfies its gate, so it can
+	// never be part of a live deadlock) — every member is a subject, ordered.
+	for (const cycle of detectCycles(doc)) out.push(finding('cycle', cycle, []));
+	// A `status:` outside the declared `statuses:` set — the one opt-in error.
+	const declared = declaredStatuses(doc);
+	if (declared)
+		for (const { issue } of allEntries(doc))
+			if (issue.status && !declared.has(issue.status))
+				out.push(finding('undeclared-status', [issue.id], [], { value: issue.status }));
+	// Lines the parser discards — file-level, located by `line`.
+	out.push(...findMalformed(doc, text));
+	// ADR 0007 `schema:` compat — file-level advisories.
+	out.push(...schemaFindings(doc));
+	return out;
+}
+
+// Lines inside a section that are neither an issue line, an indented note, nor
+// blank — content the parser silently drops. Scanned off the raw text (the model
+// has already discarded them), carrying a 1-indexed `line` for the "where" slot.
+function findMalformed(doc: Doc, text: string): Finding[] {
+	const issueRe = issueLineRe(doc.pattern);
+	const out: Finding[] = [];
+	let inSection = false;
+	const lines = text.split('\n');
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i] ?? '';
+		if (/^## /.test(line)) {
+			inSection = true;
+			continue;
+		}
+		if (!inSection || line.trim() === '') continue;
+		if (issueRe.test(line) || /^\s+/.test(line)) continue;
+		out.push(finding('malformed-line', [], [], { line: i + 1, value: line }));
+	}
+	return out;
+}
+
+// The ADR 0007 `schema:` compat findings, as structured data. Mirrors
+// `compatWarnings` (which stays for the un-migrated channels): an absent key is
+// legacy and silent; a non-numeric one is `schema-unparseable`; one newer than this
+// build is `schema-too-new`. Both advisory, both file-level (`subjects: []`).
+function schemaFindings(doc: Doc): Finding[] {
+	const entry = doc.frontmatter.find((e) => e.key === 'schema');
+	if (!entry) return [];
+	const raw = entry.raw.trim().replace(/^["']|["']$/g, '');
+	const n = Number(raw);
+	if (raw === '' || !Number.isFinite(n)) return [finding('schema-unparseable', [], [], { value: raw })];
+	if (n > SUPPORTED_SCHEMA) return [finding('schema-too-new', [], [], { value: raw })];
+	return [];
+}
+
+// The "where" slot (findings.md §2): the subject ids when there are any, else the
+// file location — a line when the finding has one, the file name otherwise.
+function findingWhere(f: Finding): string {
+	if (f.subjects.length) return f.subjects.join(', ');
+	return f.line != null ? `ISSUES.md:${f.line}` : 'ISSUES.md';
+}
+
+interface FindingProse {
+	headline: string; // the inline/report one-line reason head
+	why: string[]; // report body, authored short (~72 cols), never reflowed
+	fix: string; // report `Fix:` imperative
+	inline: string; // the inline one-line reason tail
+}
+
+// The authored prose for each code, at both densities (findings.md §4.1). The core
+// cannot wrap (ADR 0008), so report prose is authored short and split by hand. The
+// switch is exhaustive: a new code without a branch is a compile error.
+function findingProse(f: Finding): FindingProse {
+	const s = f.subjects[0] ?? ''; // the primary subject (single-subject codes)
+	const m = f.mentions[0] ?? ''; // the implicated id
+	const v = f.value ?? '';
+	switch (f.code) {
+		case 'malformed-line':
+			return {
+				headline: 'malformed line — not an issue or an indented note',
+				why: [
+					`Line ${f.line} sits in a section but is neither an issue line`,
+					'nor an indented note, so the parser drops it on read.'
+				],
+				fix: 'Fix: delete the line, or indent it to attach it as a note.',
+				inline: 'not an issue line or an indented note — the parser drops it'
+			};
+		case 'dangling-blocker':
+			return {
+				headline: `blocked-by ${m} — no such issue`,
+				why: [
+					`${m} is nowhere in this file, so the edge is ignored and`,
+					`${s} counts as unblocked.`
+				],
+				fix: `Fix: correct the id, or drop \`blocked-by:${m}\` from the line.`,
+				inline: `blocked-by ${m} not found — fails open (does not block)`
+			};
+		case 'dangling-part-of':
+			return {
+				headline: `part-of ${m} — no such issue`,
+				why: [
+					`${m} is nowhere in this file, so ${s} has no container and`,
+					'renders top-level.'
+				],
+				fix: `Fix: correct the id, or drop \`part-of:${m}\` from the line.`,
+				inline: `part-of ${m} not found — rendered top-level`
+			};
+		case 'self-blocker':
+			return {
+				headline: 'blocked-by itself',
+				why: [
+					`${s} lists itself as a blocker, so the edge is ignored.`,
+					'An issue cannot gate its own completion.'
+				],
+				fix: `Fix: drop \`blocked-by:${s}\` from the line.`,
+				inline: `blocked-by ${s} is a self-reference — edge ignored`
+			};
+		case 'cycle':
+			return {
+				headline: 'dependency cycle',
+				why: [
+					`${f.subjects.join(' → ')} → ${s}`,
+					'Each waits on the next, so none can ever become unblocked.'
+				],
+				fix: 'Fix: remove one `blocked-by:` anywhere in the loop.',
+				inline: `dependency cycle: ${f.subjects.join(' → ')} → ${s} — members stay blocked`
+			};
+		case 'undeclared-status':
+			return {
+				headline: `status:${v} — not in the declared statuses`,
+				why: [
+					`${s} carries a status the file's \`statuses:\` set does not`,
+					'declare, so the set claims something the file falsifies.'
+				],
+				fix: `Fix: correct the status, or add \`${v}\` to \`statuses:\`.`,
+				inline: `status:${v} is not in the declared statuses`
+			};
+		case 'wontfix-blocker':
+			return {
+				headline: `blocker ${m} is won't-fix`,
+				why: [
+					`${s} is unblocked because ${m} was rejected, not because it`,
+					'was done — the gate is satisfied by a won\'t-fix.'
+				],
+				fix: `Fix: nothing required — confirm ${s} can proceed without it.`,
+				inline: `blocker ${m} is won't-fix — gate satisfied by a rejected issue`
+			};
+		case 'deferred-blocker':
+			return {
+				headline: `blocker ${m} is deferred`,
+				why: [
+					`${s} is unblocked because ${m} was postponed, not because`,
+					'it was done. The work it waited on is still expected.'
+				],
+				fix: `Fix: nothing required — confirm ${s} can proceed without it.`,
+				inline: `blocker ${m} is deferred — unblocked by postponement, not completion`
+			};
+		case 'closed-with-open-blocker':
+			return {
+				headline: `closed, but blocker ${m} is open`,
+				why: [
+					`${s} was completed, and ${m} — which it waited on — is not.`,
+					`Whether that undoes ${s} depends on why ${m} is open; the`,
+					'tool can\'t know.'
+				],
+				fix: `Fix: reopen ${s} if the work is genuinely undone.`,
+				inline: `closed, but blocker ${m} is open`
+			};
+		case 'schema-unparseable':
+			return {
+				headline: `schema:${v} — not a recognized format version`,
+				why: [
+					'The `schema:` value is not numeric, so this build reads the',
+					'file as legacy format. It may not round-trip cleanly.'
+				],
+				fix: 'Fix: set `schema:` to a version this build writes, or remove it.',
+				inline: `schema:${v} is not a recognized format version — may not round-trip`
+			};
+		case 'schema-too-new':
+			return {
+				headline: `schema ${v} is newer than this build understands`,
+				why: [
+					`This build understands schema ${SUPPORTED_SCHEMA}; the file declares a`,
+					'newer one, so it may not round-trip cleanly.'
+				],
+				fix: `Fix: upgrade \`issues\` to a build that understands schema ${v}.`,
+				inline: `file declares schema ${v}; this build understands ${SUPPORTED_SCHEMA} — may not round-trip`
+			};
+		default: {
+			const _exhaustive: never = f.code;
+			throw new Error(`unhandled finding code: ${String(_exhaustive)}`);
+		}
+	}
+}
+
+/**
+ * Render a finding at one of two densities (findings.md §4.1), coloured by severity
+ * only where `color` is true (ADR 0008: `error`→red, `advisory`→dim):
+ *   · **inline** (default) — one line `<glyph> <where>  <reason>`, for the stderr
+ *     block and `show`'s dossier (later tickets #39/#40);
+ *   · **report** — the three-part `doctor` form: where · why (authored prose) · `Fix:`.
+ * The core never wraps — report prose is authored short and split by hand.
+ */
+export function formatFinding(f: Finding, color: boolean, density: 'inline' | 'report' = 'inline'): string {
+	const prose = findingProse(f);
+	const style: AnsiStyle = f.severity === 'error' ? 'red' : 'dim';
+	if (density === 'inline') {
+		const glyph = f.severity === 'error' ? '!' : '·';
+		return paint(`${glyph} ${findingWhere(f)}  ${prose.inline}`, style, color);
+	}
+	const lines = [
+		`  ${findingWhere(f)}  ${prose.headline}`,
+		...prose.why.map((l) => `    ${l}`),
+		`    ${prose.fix}`
+	];
+	return paint(lines.join('\n'), style, color);
+}
+
 // ── doctor (read-only linter, §5 decision 19) ────────────────────────────────
 // Every anomaly the file carries, in one flat list: the §3 graph advisories, any
 // status outside a declared `statuses:` set, and structurally malformed lines.
@@ -1418,13 +1715,35 @@ function malformedLines(text: string, pattern: string): string[] {
 	return out;
 }
 
-/** `doctor` — human-readable grouped findings; exit code is the caller's job (§5 decision 19). */
-export function cmdDoctor(doc: Doc, text: string): string {
-	const findings = doctorFindings(doc, text);
-	if (!findings.length) return 'No issues found — clean.';
-	const lines = [`${findings.length} finding${findings.length === 1 ? '' : 's'}:`];
-	for (const f of findings) lines.push(`  · ${f}`);
-	return lines.join('\n');
+/**
+ * `doctor` — the grouped report (findings.md §5.1): findings grouped by severity
+ * (errors first), prose tier headers, a footer tally. `No findings.` when clean.
+ * Findings ride stdout, so they colour by severity where `color` is true (§4.4).
+ * The exit code is the caller's job (§5.3).
+ */
+export function cmdDoctor(doc: Doc, text: string, color = false): string {
+	const all = findings(doc, text);
+	if (!all.length) return 'No findings.';
+	const errors = all.filter((f) => f.severity === 'error');
+	const advisories = all.filter((f) => f.severity === 'advisory');
+	const blocks: string[] = [];
+	const group = (header: string, fs: Finding[]): void => {
+		if (!fs.length) return;
+		blocks.push(header, '');
+		for (const f of fs) blocks.push(formatFinding(f, color, 'report'), '');
+	};
+	group('ERRORS — the file does not mean what it says', errors);
+	group('ADVISORIES — nothing is wrong, but something you rely on may not hold', advisories);
+	blocks.push(doctorFooter(errors.length, advisories.length));
+	return blocks.join('\n');
+}
+
+// The report footer (findings.md §5.1): both tiers, each pluralised independently,
+// so an advisories-only pass reads `0 errors, 1 advisory` — a pass, not an alarm.
+function doctorFooter(errors: number, advisories: number): string {
+	const e = `${errors} error${errors === 1 ? '' : 's'}`;
+	const a = `${advisories} advisor${advisories === 1 ? 'y' : 'ies'}`;
+	return `${e}, ${a}`;
 }
 
 // ── `--json` read contract (§6) ──────────────────────────────────────────────
@@ -1518,9 +1837,21 @@ export function cmdShowJson(doc: Doc, idInput: string, opts: ShowOptions = {}) {
 	return result;
 }
 
+// `doctor --json` — `{ findings: Finding[] }`, `ok` dropped (findings.md §5.2): once
+// the exit code is the gate, `ok` is a second encoding where drift lives. Every
+// finding carries the full field set (`value`/`line` as null when absent) so the
+// machine shape is stable regardless of code.
 export function cmdDoctorJson(doc: Doc, text: string) {
-	const findings = doctorFindings(doc, text);
-	return { ok: findings.length === 0, findings };
+	return {
+		findings: findings(doc, text).map((f) => ({
+			severity: f.severity,
+			code: f.code,
+			subjects: f.subjects,
+			mentions: f.mentions,
+			value: f.value ?? null,
+			line: f.line ?? null
+		}))
+	};
 }
 
 // ── CLI dispatch ───────────────────────────────────────────────────────────
@@ -1637,7 +1968,7 @@ Reads (add --json for the machine contract; -q silences advisories):
   ready  [filters] [--limit N]                           the whole takeable frontier
   show <id> [--children]                                 full resolved dossier
   tree [--all|--closed|--deferred|--wontfix] [filters]   containment forest (default: open)
-  doctor                                                 lint the file (exit nonzero on findings)
+  doctor                                                 lint the file (exit 1 on any error finding)
 
 Mutations:
   add "<title>" [--note <t>] [--part-of <id>] [--blocked-by <id[,id]>]
@@ -1669,7 +2000,7 @@ export interface RunResult {
 	output: string; // text to print to stdout
 	mutated: boolean; // whether the file should be written back
 	warnings: string[]; // advisory §3 messages — bin.ts prints to stderr, never mixed into `output`
-	exitCode?: number; // defaults to 0; `doctor` sets 1 on findings (the sole exception)
+	exitCode?: number; // defaults to 0; `doctor` sets 1 on any error finding (the sole exception)
 }
 
 // Fill the advisory defaults so each dispatch arm names only what it produces —
@@ -1752,11 +2083,13 @@ export function run(text: string, argv: string[], render: RenderOptions = DEFAUL
 			return result({ text, mutated: false, output, warnings: advisories() });
 		}
 		case 'doctor': {
-			// The one exit-code exception (§5 decision 19): findings are the actionable
-			// signal, so a non-empty report exits nonzero. Findings ride stdout, not stderr.
-			const findings = doctorFindings(doc, text);
-			const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text);
-			return result({ text, mutated: false, output, exitCode: findings.length ? 1 : 0 });
+			// The exit code is a threshold-shaped contract (findings.md §5.3): 1 iff any
+			// finding is `error`-or-above, else 0 — so an advisories-only file exits 0.
+			// Findings ride stdout, not the stderr advisory channel; they colour there.
+			const found = findings(doc, text);
+			const output = wantJson ? jsonOut(cmdDoctorJson(doc, text)) : cmdDoctor(doc, text, render.color);
+			const exitCode = found.some((f) => f.severity === 'error') ? 1 : 0;
+			return result({ text, mutated: false, output, exitCode });
 		}
 
 		// ── Mutations ──────────────────────────────────────────────────────────────
