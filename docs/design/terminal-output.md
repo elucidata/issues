@@ -389,6 +389,13 @@ unstable and may change in any release.**
 State this plainly in the docs: at 0.x the declaration buys **permission**, not
 protection.
 
+> **Extended by [ADR 0009](../adr/0009-finding-model-severity-and-emission.md) /
+> [`findings.md`](findings.md):** this posture now covers findings. `doctor`'s **exit code**
+> becomes a stable, threshold-shaped contract alongside `--json` (exit 1 iff any finding is
+> `error` or above); the **human report** stays unstable, as here. Findings colour by
+> severity (`error` → red, `advisory` → dim) wherever the stream is coloured, and ride an
+> uncoloured, glyph-carried channel on stderr — no second `isTTY` probe (§6).
+
 ---
 
 ## 8. Back-compat summary
@@ -473,6 +480,12 @@ Recorded as they land, per item 10.
 - **`doctor` does not take the render options** (item 1, #27). §1.1 scopes the state
   vocabulary to `list` / `tree` / `next` / `ready` / `show`; `doctor` emits findings,
   not compact rows, and no section of this spec gives it anything to render.
+  > **Superseded by [ADR 0009](../adr/0009-finding-model-severity-and-emission.md) /
+  > [`findings.md`](findings.md) §4.4:** findings are given severity colour on stdout
+  > (`error` → red, `advisory` → dim), so `doctor`'s report *does* now render — `cmdDoctor`
+  > gains the `color` boolean (`cmdDoctor(doc, text, color)`) and `bin.ts` threads
+  > `render.color` to it. This design was correct for the terminal-output effort, which gave
+  > `doctor` nothing to colour; the finding model is what gave it something.
 - **`next` / `ready` rows stay sparse** (item 3, #28). They render through the shared
   row for gutter and colour, but keep today's field selection — no `status:`/`@`/`#`
   markers, no datestamp. Every frontier row is open and unclaimed by construction, so

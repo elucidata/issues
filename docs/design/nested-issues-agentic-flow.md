@@ -192,8 +192,13 @@ stored.**
   round-trips verbatim; a human breaks it by editing an edge.
 - **Self-reference** (`A blocked-by A`) → the edge is **ignored** + warn.
 - **Won't-Fix blocker** satisfies the gate (per "any closed section") but *may*
-  deserve an advisory warning ("downstream unblocked by a won't-fix"). Implementation
+  deserve an advisory ("downstream unblocked by a won't-fix"). Implementation
   nicety, not a hard rule.
+  > **Amended by [ADR 0009](../adr/0009-finding-model-severity-and-emission.md):** this is
+  > the `wontfix-blocker` finding, classified an **advisory** (a state a maintainer may
+  > leave in place forever) — no longer optional, and no longer driving `doctor` to exit 1
+  > on a healthy file. Its sibling `deferred-blocker` (a blocker in `Deferred`) is added by
+  > the same walk, which broadens to **every** section.
 
 ### 3.2 Containment (`part-of:`, single-valued)
 
@@ -226,6 +231,14 @@ stored.**
 Dangling ref, cycle, and won't-fix-blocker are **inputs to the CLI surface** (§5),
 which decides their reject-vs-warn *presentation*. The rule across the board:
 **warn, never block a write** (§5, decision 7–8).
+
+> **Amended by [ADR 0009](../adr/0009-finding-model-severity-and-emission.md) /
+> [`findings.md`](findings.md):** these three, plus malformed lines, undeclared-status,
+> and the `schema:` compat cases, are unified as **findings** — structured data with a
+> `severity` (`error` | `advisory`), not strings. "Warning" is reserved as the name of a
+> future middle tier; the genus is **finding**. Emission is no longer "on graph-reading
+> commands" but a scoped filter: reads speak findings about ids they *printed*, writes
+> speak findings about the id they *touched*. See `findings.md` §3.
 
 ---
 
@@ -333,6 +346,19 @@ filters (list/next/ready): --status <s> | --label <n> | --parent <id> | --assign
 ```
 
 ### 5.2 Decisions (numbered as grilled — normative)
+
+> **Amended by [ADR 0009](../adr/0009-finding-model-severity-and-emission.md) /
+> [`findings.md`](findings.md)** — the finding model refines four of these:
+> **7** — a written `status:` outside the declared `statuses:` set is the
+> `undeclared-status` **error** (it makes a false claim about other lines); write-time is
+> still warn-but-write, but `doctor` now reports it and the exit code reflects it.
+> **8** — findings are emitted by a *scope relation*, not this fixed command list: a read
+> speaks findings whose subjects it printed; a write speaks findings that name the id it
+> touched, iff it wrote `blocked-by`/`part-of`/`status`/section membership. `-q` shows
+> `error` and above (not "silences advisories wholesale").
+> **10** — `doctor`'s exit is a **contract**: exit 1 iff any finding is `error` or above.
+> **19** — `doctor` groups by severity (errors first) with prose tier headers and a footer
+> count; `--json` is `{ findings: Finding[] }` (`ok` dropped).
 
 1. **Mutation model — hybrid.** Verbs manage collections and pointers; `set` replaces
    a scalar. Verbs for relational/many-valued fields (they want validation + an

@@ -28,3 +28,10 @@ normative build spec is
 [`docs/design/terminal-output.md`](../design/terminal-output.md).
 
 - [0008 — Terminal output: state gutter, colour, `--plain`, and read filtering](0008-terminal-output-state-gutter-colour-plain.md)
+
+## The finding model
+
+Compiled from [Wayfinder map #32](https://github.com/elucidata/issues/issues/32). The
+normative build spec is [`docs/design/findings.md`](../design/findings.md).
+
+- [0009 — The finding model: structured findings, severity tiers, and scoped emission](0009-finding-model-severity-and-emission.md)

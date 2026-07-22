@@ -7,6 +7,13 @@
   gains `list`'s filters and defaults to open; the reads gain `--plain` / `--color` /
   `--no-color`. ADR 0008 also makes the asymmetry normative: **`--json` is the only
   stable read surface; human-readable output may change in any release.**
+- **Amended by:** [ADR 0009](0009-finding-model-severity-and-emission.md) — the finding
+  model refines decisions **7** (a declared-status mismatch is an `undeclared-status`
+  **error**, not a bare warn-but-write), **8** (emission is a scoped filter over one
+  producer, keyed on what a command *writes* and what a read *prints*, not a fixed command
+  list), **10** (`doctor`'s exit code is a threshold-shaped **contract** — exit 1 iff any
+  finding is `error` or above), and **19** (`doctor` groups findings by severity, `--json`
+  is `{ findings }` with `ok` dropped).
 - **Supersedes:** two sub-points of [ADR 0004](0004-frontier-query.md) (`--mine`, frontier-`--all`)
 
 ## Context

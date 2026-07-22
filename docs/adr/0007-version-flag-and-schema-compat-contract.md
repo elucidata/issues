@@ -3,6 +3,12 @@
 - **Status:** Accepted
 - **Ticket:** none — charted via a `/wayfinder` grilling that surfaced no fog
   (single-session scope), so no map was raised. This ADR is normative on its own.
+- **Extended by:** [ADR 0009](0009-finding-model-severity-and-emission.md) — the `schema:`
+  compat codes (`schema-unparseable`, `schema-too-new`) join `doctor` as **advisories**;
+  0007's forward "advisory, never a gate" contract survives **intact** (it is not
+  superseded). ADR 0009 also names the second compat contract 0007 left implicit: the
+  library's **TypeScript surface**, governed by package semver, is distinct from this file
+  format's `schema:` contract.
 
 ## Context
 

@@ -12,6 +12,12 @@
   shipped in `0.3.0`. Departures from the spec are recorded in its §9.0.
 - **Amends:** [ADR 0005](0005-cli-surface.md) — `tree` gains `list`'s filters and
   defaults to open; the read commands gain `--plain` / `--color` / `--no-color`.
+- **Amended by:** [ADR 0009](0009-finding-model-severity-and-emission.md) — the finding
+  model extends the output posture to findings: `doctor` now takes the `color` render
+  option (§9.0's "`doctor` does not take the render options" is superseded), findings
+  colour by severity (`error` → red, `advisory` → dim) on stdout, and the stderr channel
+  stays uncoloured with severity carried by glyphs (`!` / `·` / `→`), adding no second
+  `isTTY` probe.
 
 ## Context
 
