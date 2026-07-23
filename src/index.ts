@@ -32,6 +32,10 @@ const WONTFIX_SECTION: SectionName = "Won't Fix";
 const CHECKED_SECTIONS = new Set<SectionName>([DONE_SECTION]);
 // Indentation applied to an issue's note (detail) lines.
 const DETAIL_INDENT = '      '; // 6 spaces, aligning under the title
+// Blank-wrapped `---` thematic break between successive notes on one issue (ADR
+// 0010). Stored as interior lines, so the blanks re-emit as truly empty (no
+// trailing whitespace) and the file stays a fixed point.
+const NOTE_DIVIDER = ['', '---', ''];
 // Default ID pattern when the file has no frontmatter. `#` runs are zero-padded.
 // Numeric-only by default so the tool carries no project-specific prefix; a host
 // repo picks its own (e.g. `M##`) via the `pattern` frontmatter key.
@@ -164,26 +168,46 @@ export function parse(text: string): Doc {
 	for (const name of SECTION_ORDER) sections.set(name, []);
 	let current: Issue[] | null = null;
 	let lastIssue: Issue | null = null;
+	// The note is the run of indented-or-blank lines after an issue, up to the first
+	// non-indented, non-blank line (ADR 0010). Buffer them raw so interior blank
+	// lines and relative indentation survive, then normalize on flush.
+	let noteBuffer: string[] = [];
+	const flushNote = () => {
+		if (lastIssue) lastIssue.detail = dedentNote(noteBuffer);
+		noteBuffer = [];
+	};
 	for (let j = firstSection; j < lines.length; j++) {
 		const line = lines[j] ?? '';
 		const head = line.match(/^## (.+?)\s*$/);
 		if (head) {
+			flushNote();
 			const name = head[1] as SectionName;
 			if (!sections.has(name)) sections.set(name, []);
 			current = sections.get(name)!;
 			lastIssue = null;
 			continue;
 		}
-		if (current === null || line.trim() === '') continue;
+		if (current === null) continue;
 		const m = line.match(issueRe);
 		if (m) {
+			flushNote();
 			lastIssue = toIssue(m[1] !== ' ', m[2] ?? '', m[3] ?? '', pattern);
 			current.push(lastIssue);
 			continue;
 		}
-		// Indented continuation → note line for the preceding issue.
-		if (/^\s+/.test(line) && lastIssue) lastIssue.detail.push(line.trimStart());
+		// Significant indentation: any ≥1 leading whitespace continues the note; a
+		// blank line is buffered too (it may be interior). A non-indented, non-blank
+		// line closes the note and detaches from the issue.
+		if (line.trim() === '') {
+			if (lastIssue) noteBuffer.push(line);
+		} else if (/^\s+/.test(line) && lastIssue) {
+			noteBuffer.push(line);
+		} else {
+			flushNote();
+			lastIssue = null;
+		}
 	}
+	flushNote();
 
 	return { frontmatter, nextId, pattern, preamble, sections };
 }
@@ -265,6 +289,27 @@ function trimBlankEdges(arr: string[]): string[] {
 	return arr.slice(start, end);
 }
 
+// Normalize a note body (ADR 0010): trim leading/trailing blank lines — the note
+// owns its interior, the section owns entry separation — then strip the minimum
+// indentation shared by the non-blank lines so relative nesting (lists, fenced
+// code) survives verbatim. Blank interior lines collapse to truly empty strings
+// (zero chars), so re-emitting them under DETAIL_INDENT leaves no trailing
+// whitespace and the file stays a byte-for-byte fixed point. Shared by the parser
+// and the note-writing verbs so hand-edited and CLI-entered structure round-trip
+// identically.
+function dedentNote(raw: string[]): string[] {
+	const lines = trimBlankEdges(raw);
+	if (!lines.length) return [];
+	// At least one non-blank line survives the edge-trim, so `min` is always finite.
+	let min = Infinity;
+	for (const l of lines) {
+		if (l.trim() === '') continue;
+		const indent = l.length - l.trimStart().length;
+		if (indent < min) min = indent;
+	}
+	return lines.map((l) => (l.trim() === '' ? '' : l.slice(min)));
+}
+
 // ── Serialize ────────────────────────────────────────────────────────────
 export function serialize(doc: Doc): string {
 	const fm = doc.frontmatter
@@ -301,7 +346,10 @@ function renderIssue(issue: Issue): string {
 	if (issue.assignee) line += ` @${issue.assignee}`;
 	for (const l of issue.labels) line += ` #${l}`;
 	if (issue.date) line += ` (${issue.date})`;
-	const detail = issue.detail.map((d) => DETAIL_INDENT + d);
+	// Interior blank lines re-emit as truly empty lines (zero chars) so the file
+	// carries no trailing whitespace and stays a fixed point (ADR 0010); non-blank
+	// lines re-indent under the canonical 6-space base, preserving relative nesting.
+	const detail = issue.detail.map((d) => (d === '' ? '' : DETAIL_INDENT + d));
 	return [line, ...detail].join('\n');
 }
 
@@ -380,7 +428,7 @@ export interface AddFields {
 
 export function cmdAdd(doc: Doc, title: string, note?: string, fields: AddFields = {}): string {
 	const id = formatId(doc.nextId, doc.pattern);
-	const detail = note ? note.split('\n').map((l) => l.trimStart()) : [];
+	const detail = note ? dedentNote(note.split('\n')) : [];
 	// A bare `add` writes no tail fields — no `status:`, no sigils — so a
 	// metadata-free file stays byte-identical (§2.2, §8). Field flags (§5 decision 2)
 	// are stored normalized (ids canonicalized) to match the verbs' write form.
@@ -433,7 +481,13 @@ export function cmdEdit(doc: Doc, idInput: string, title: string): string {
 
 export function cmdNote(doc: Doc, idInput: string, text: string): string {
 	const { issue } = requireIssue(doc, idInput);
-	for (const l of text.split('\n')) issue.detail.push(l.trimStart());
+	const lines = dedentNote(text.split('\n'));
+	if (!lines.length) return `${issue.id} note added`;
+	// Appending to an issue that already carries a note inserts a blank-wrapped
+	// `---` thematic break so successive notes read as distinct entries (ADR 0010);
+	// suppressed for the first note.
+	if (issue.detail.length) issue.detail.push(...NOTE_DIVIDER);
+	issue.detail.push(...lines);
 	return `${issue.id} note added`;
 }
 

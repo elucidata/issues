@@ -489,6 +489,16 @@ Reflow of a tight (single-`\n`) file on its first CLI write is **defined behavio
 not a bug** — it is how the two coexistence goals are met at once: stop clobbering
 hand-added blanks, and keep one legible canonical form.
 
+> **Amended by [ADR 0010](../adr/0010-markdown-fidelity-notes-significant-indentation.md)
+> (#43).** A note is now the run of *indented-or-blank* lines after an issue line, up
+> to the first non-indented, non-blank line — significant indentation. Interior blank
+> lines and relative indentation (nested lists, fenced code) round-trip verbatim via a
+> common-prefix dedent on read and a 6-space re-emit on write; interior blanks re-emit
+> as truly empty lines, so the fidelity-carrying file stays a fixed point. This retires
+> §7.1's "a blank before an indented detail line would risk the parser detaching the
+> note" caveat — with indentation significant, a blank no longer detaches. No `schema:`
+> bump (ADR 0007): additive fidelity, graceful degradation on old builds.
+
 ### 7.3 One-time migration (the only residual build risk)
 
 The repo's own `ISSUES.md` and **every** single-`\n` test fixture migrate once to

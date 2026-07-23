@@ -35,3 +35,9 @@ Compiled from [Wayfinder map #32](https://github.com/elucidata/issues/issues/32)
 normative build spec is [`docs/design/findings.md`](../design/findings.md).
 
 - [0009 — The finding model: structured findings, severity tiers, and scoped emission](0009-finding-model-severity-and-emission.md)
+
+## Note fidelity
+
+Compiled from [#43](https://github.com/elucidata/issues/issues/43).
+
+- [0010 — Markdown-fidelity notes / significant-indentation round-trip](0010-markdown-fidelity-notes-significant-indentation.md)

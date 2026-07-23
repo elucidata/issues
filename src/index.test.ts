@@ -156,6 +156,54 @@ pattern: "###"
 `;
 		expect(serialize(parse(plain))).toBe(plain);
 	});
+
+	// ADR 0010 — Markdown-fidelity notes / significant-indentation round-trip.
+	// A multi-paragraph note carrying a nested list, a fenced code block, interior
+	// blank lines, and an appended-note `---` divider is a byte-for-byte fixed point:
+	// interior blanks re-emit as truly empty lines (zero chars) and relative
+	// indentation survives the common-prefix dedent → 6-space re-emit.
+	const FIDELITY = `---
+next_id: 2
+pattern: "###"
+---
+# Tracker
+
+## Issues
+
+- [ ] 001: Notes preserve Markdown fidelity.
+      First paragraph of the note.
+
+      Second paragraph introduces a nested list:
+
+      - parent item
+        - nested child
+        - another child
+
+      And a fenced code block:
+
+      \`\`\`ts
+      const x = 1
+      \`\`\`
+
+      ---
+
+      Appended follow-up after a thematic break.
+
+## Completed
+
+## Deferred
+
+## Won't Fix
+`;
+
+	it('round-trips a Markdown-fidelity note byte-for-byte (ADR 0010)', () => {
+		expect(serialize(parse(FIDELITY))).toBe(FIDELITY);
+	});
+
+	it('is idempotent over a Markdown-fidelity note', () => {
+		const once = serialize(parse(FIDELITY));
+		expect(serialize(parse(once))).toBe(once);
+	});
 });
 
 describe('id helpers', () => {
@@ -261,6 +309,33 @@ describe('cmdEdit / cmdNote / cmdShow', () => {
 		const doc = parse(SAMPLE);
 		cmdNote(doc, '1', 'Check the button radius tokens.');
 		expect(findIssue(doc, '1')!.issue.detail).toEqual(['Check the button radius tokens.']);
+	});
+
+	it('preserves interior blank lines and relative indentation (common-prefix dedent)', () => {
+		const doc = parse(SAMPLE);
+		cmdNote(doc, '1', '  Steps:\n\n  - one\n    - nested\n  - two');
+		// The whole note shares a 2-space common prefix → dedented to 0; the nested
+		// child keeps its relative 2-space indent; the interior blank survives as ''.
+		expect(findIssue(doc, '1')!.issue.detail).toEqual([
+			'Steps:',
+			'',
+			'- one',
+			'  - nested',
+			'- two'
+		]);
+	});
+
+	it('inserts a blank-wrapped --- divider before an appended note, none for the first', () => {
+		const doc = parse(SAMPLE);
+		cmdNote(doc, '1', 'First observation.');
+		cmdNote(doc, '1', 'Second, later observation.');
+		expect(findIssue(doc, '1')!.issue.detail).toEqual([
+			'First observation.',
+			'',
+			'---',
+			'',
+			'Second, later observation.'
+		]);
 	});
 
 	it('renders an issue with its note', () => {

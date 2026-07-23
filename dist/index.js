@@ -6,6 +6,7 @@ var DEFER_SECTION = "Deferred";
 var WONTFIX_SECTION = "Won't Fix";
 var CHECKED_SECTIONS = new Set([DONE_SECTION]);
 var DETAIL_INDENT = "      ";
+var NOTE_DIVIDER = ["", "---", ""];
 var DEFAULT_PATTERN = "###";
 var SUPPORTED_SCHEMA = 1;
 function issueLineRe(pattern) {
@@ -64,10 +65,17 @@ function parse(text) {
     sections.set(name, []);
   let current = null;
   let lastIssue = null;
+  let noteBuffer = [];
+  const flushNote = () => {
+    if (lastIssue)
+      lastIssue.detail = dedentNote(noteBuffer);
+    noteBuffer = [];
+  };
   for (let j = firstSection;j < lines.length; j++) {
     const line = lines[j] ?? "";
     const head = line.match(/^## (.+?)\s*$/);
     if (head) {
+      flushNote();
       const name = head[1];
       if (!sections.has(name))
         sections.set(name, []);
@@ -75,17 +83,26 @@ function parse(text) {
       lastIssue = null;
       continue;
     }
-    if (current === null || line.trim() === "")
+    if (current === null)
       continue;
     const m = line.match(issueRe);
     if (m) {
+      flushNote();
       lastIssue = toIssue(m[1] !== " ", m[2] ?? "", m[3] ?? "", pattern);
       current.push(lastIssue);
       continue;
     }
-    if (/^\s+/.test(line) && lastIssue)
-      lastIssue.detail.push(line.trimStart());
+    if (line.trim() === "") {
+      if (lastIssue)
+        noteBuffer.push(line);
+    } else if (/^\s+/.test(line) && lastIssue) {
+      noteBuffer.push(line);
+    } else {
+      flushNote();
+      lastIssue = null;
+    }
   }
+  flushNote();
   return { frontmatter, nextId, pattern, preamble, sections };
 }
 function toIssue(checked, id, rest, pattern) {
@@ -163,6 +180,20 @@ function trimBlankEdges(arr) {
     end--;
   return arr.slice(start, end);
 }
+function dedentNote(raw) {
+  const lines = trimBlankEdges(raw);
+  if (!lines.length)
+    return [];
+  let min = Infinity;
+  for (const l of lines) {
+    if (l.trim() === "")
+      continue;
+    const indent = l.length - l.trimStart().length;
+    if (indent < min)
+      min = indent;
+  }
+  return lines.map((l) => l.trim() === "" ? "" : l.slice(min));
+}
 function serialize(doc) {
   const fm = doc.frontmatter.map((e) => `${e.key}: ${e.key === "next_id" ? doc.nextId : e.raw}`).join(`
 `);
@@ -207,7 +238,7 @@ function renderIssue(issue) {
     line += ` #${l}`;
   if (issue.date)
     line += ` (${issue.date})`;
-  const detail = issue.detail.map((d) => DETAIL_INDENT + d);
+  const detail = issue.detail.map((d) => d === "" ? "" : DETAIL_INDENT + d);
   return [line, ...detail].join(`
 `);
 }
@@ -261,8 +292,8 @@ function today() {
 }
 function cmdAdd(doc, title, note, fields = {}) {
   const id = formatId(doc.nextId, doc.pattern);
-  const detail = note ? note.split(`
-`).map((l) => l.trimStart()) : [];
+  const detail = note ? dedentNote(note.split(`
+`)) : [];
   doc.sections.get(OPEN_SECTION).push({
     id,
     num: doc.nextId,
@@ -305,9 +336,13 @@ function cmdEdit(doc, idInput, title) {
 }
 function cmdNote(doc, idInput, text) {
   const { issue } = requireIssue(doc, idInput);
-  for (const l of text.split(`
-`))
-    issue.detail.push(l.trimStart());
+  const lines = dedentNote(text.split(`
+`));
+  if (!lines.length)
+    return `${issue.id} note added`;
+  if (issue.detail.length)
+    issue.detail.push(...NOTE_DIVIDER);
+  issue.detail.push(...lines);
   return `${issue.id} note added`;
 }
 function cmdBlock(doc, idInput, byInput) {

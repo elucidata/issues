@@ -154,6 +154,9 @@ issues done 7                                 # -> Completed, datestamped (statu
 Optional `---` frontmatter with `next_id` and `pattern` (ID shape, e.g. `CP##` →
 `CP01`; default `###`). Four fixed sections in order: `## Issues` (open),
 `## Completed`, `## Deferred`, `## Won't Fix`. Issue lines are
-`- [ ] <id>: <title>` with an optional ` (YYYY-MM-DD)` datestamp; indented lines
-beneath an issue are its notes. The file round-trips byte-for-byte, so the CLI
-and hand-edits coexist safely — but let the CLI manage IDs and datestamps.
+`- [ ] <id>: <title>` with an optional ` (YYYY-MM-DD)` datestamp; the indented run
+beneath an issue is its note. Notes are Markdown-faithful — interior blank lines and
+relative indentation (nested lists, fenced code) round-trip verbatim; a second `note`
+on the same issue is separated from the first by a `---` divider. The file round-trips
+byte-for-byte, so the CLI and hand-edits coexist safely — but let the CLI manage IDs
+and datestamps.
